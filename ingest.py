@@ -16,16 +16,21 @@ import argparse
 import logging
 import os
 import sys
+import re
+import warnings
 from multiprocessing import Pool
 from pathlib import Path
 
 import requests
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from chromadb import PersistentClient
 from dotenv import load_dotenv
 from litellm import completion
 from mistralai.client import Mistral
 from openai import OpenAI
 from tenacity import retry, wait_exponential
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 from models.research import Chunk, Chunks, EdgarFiling, Result
 
@@ -53,6 +58,8 @@ log = logging.getLogger(__name__)
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
+
+SEC_HEADERS = {"User-Agent": "edgar-research-rag research@example.com"}
 
 
 # Step 1 — Fetch filings from SEC EDGAR
@@ -160,145 +167,189 @@ def resolve_pdf_url(ticker: str, form_type: str) -> str | None:
 
 def fetch_filings_v2(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
     """
-    Improved filing fetcher using EDGAR company search API.
-    Falls back to a direct URL construction approach.
+    Fetch recent filings using the EDGAR submissions API.
+    More reliable than full-text search — returns primary document directly.
     """
     from datetime import datetime
 
-    log.info(f"Fetching {form_type} for {ticker} via EDGAR search")
+    TICKER_TO_CIK = {
+        "AAPL": "0000320193", "MSFT": "0000789019", "NVDA": "0001045810",
+        "GOOGL": "0001652044", "AMZN": "0001018724", "META": "0001326801",
+        "TSLA": "0001318605", "JPM": "0000019617", "GS": "0000886982",
+        "NFLX": "0001065280", "AMD": "0000002488", "INTC": "0000050863",
+    }
 
-    search_url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms={form_type}"
+    cik = TICKER_TO_CIK.get(ticker.upper())
+    if not cik:
+        log.warning(f"No CIK mapping for {ticker} — add it to TICKER_TO_CIK")
+        return []
+
+    log.info(f"Fetching {form_type} for {ticker} via submissions API (CIK: {cik})")
+    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     try:
-        resp = requests.get(search_url, headers=SEC_HEADERS, timeout=15)
+        resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        log.error(f"EDGAR search failed for {ticker}: {e}")
+        log.error(f"Submissions API failed for {ticker}: {e}")
         return []
 
-    hits = data.get("hits", {}).get("hits", [])
-    if not hits:
-        log.warning(f"No hits for {ticker} {form_type}")
-        return []
+    company_name = data.get("name", ticker)
+    filings_data = data.get("filings", {}).get("recent", {})
+    forms = filings_data.get("form", [])
+    dates = filings_data.get("filingDate", [])
+    accessions = filings_data.get("accessionNumber", [])
+    primary_docs = filings_data.get("primaryDocument", [])
+    periods = filings_data.get("reportDate", [])
 
     filings = []
-    for hit in hits[:k]:
-        src = hit.get("_source", {})
-        accession = hit.get("_id", "")
-        entity_name = src.get("entity_name", ticker)
-        file_date = src.get("file_date", "")
-        period = src.get("period_of_report", "")
-        entity_id = src.get("entity_id", "")
+    for i, form in enumerate(forms):
+        if form != form_type:
+            continue
+        if len(filings) >= k:
+            break
+
+        accession = accessions[i]
+        cik_short = cik.lstrip("0")
+        acc_clean = accession.replace("-", "")
+        primary_doc = primary_docs[i]
+
+        doc_url = (
+            f"https://www.sec.gov/Archives/edgar/data/"
+            f"{cik_short}/{acc_clean}/{primary_doc}"
+        )
+        filing_url = (
+            f"https://www.sec.gov/Archives/edgar/data/"
+            f"{cik_short}/{acc_clean}/{accession}-index.htm"
+        )
 
         try:
-            filed_dt = datetime.strptime(file_date, "%Y-%m-%d")
+            filed_dt = datetime.strptime(dates[i], "%Y-%m-%d")
         except Exception:
             filed_dt = datetime.utcnow()
 
-        # Build filing index URL
-        if entity_id and accession:
-            acc_clean = accession.replace("-", "")
-            filing_url = f"https://www.sec.gov/Archives/edgar/data/{entity_id}/{acc_clean}/{accession}-index.htm"
-            pdf_url = filing_url  # will be resolved during OCR step
-        else:
-            filing_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={ticker}&type={form_type}&dateb=&owner=include&count=5"
-            pdf_url = None
-
         filing = EdgarFiling(
             ticker=ticker.upper(),
-            company_name=entity_name,
+            company_name=company_name,
             form_type=form_type,
             filed_at=filed_dt,
-            period_of_report=period,
+            period_of_report=periods[i] if i < len(periods) else "",
             filing_url=filing_url,
-            pdf_url=pdf_url,
+            pdf_url=doc_url,
         )
         filings.append(filing)
-        log.info(f"Resolved: {entity_name} | {form_type} | filed {file_date} | period {period}")
+        log.info(
+            f"Resolved: {company_name} | {form_type} | "
+            f"filed {dates[i]} | period {periods[i]}"
+        )
 
     return filings
 
 
 def get_primary_doc_url(filing: EdgarFiling) -> str | None:
+    """Return the pre-resolved primary doc URL from the filing."""
+    return filing.pdf_url or None
+
+
+# Step 2 — Extract text from filings
+
+
+def extract_html(url: str, max_chars: int | None = None) -> str:
     """
-    Given a filing index URL, fetch the index page and extract
-    the primary document (10-K or 10-Q HTML/PDF) URL.
+    Fetch an SEC HTML filing and extract clean text using BeautifulSoup.
+    This is the primary extraction method for modern EDGAR filings.
     """
+    log.info(f"Fetching HTML: {url}")
     try:
-        resp = requests.get(filing.filing_url, headers=SEC_HEADERS, timeout=15)
+        resp = requests.get(url, headers=SEC_HEADERS, timeout=30)
         resp.raise_for_status()
-        text = resp.text
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.content, "lxml")
 
-        # Look for the primary document link in the index
+        # Remove noise: scripts, styles, XBRL metadata
+        for tag in soup(["script", "style", "head", "ix:header", "xbrl"]):
+            tag.decompose()
+
+        text = soup.get_text(separator="\n", strip=True)
+
+        # Collapse excessive blank lines
         import re
-        # Match .htm or .pdf links that are not the index itself
-        patterns = [
-            r'href="(/Archives/edgar/data/[^"]+\.htm)"',
-            r'href="(/Archives/edgar/data/[^"]+\.pdf)"',
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            for match in matches:
-                if "index" not in match.lower():
-                    url = f"https://www.sec.gov{match}"
-                    log.info(f"Primary doc URL: {url}")
-                    return url
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        if max_chars:
+            text = text[:max_chars]
+
+        log.info(f"Extracted {len(text):,} chars from HTML")
+        return text
     except Exception as e:
-        log.warning(f"Could not parse filing index for {filing.ticker}: {e}")
-    return None
-
-
-# Step 2 — OCR via Mistral
-
-
-def ocr_document(url: str, max_pages: int | None = None) -> str:
-    """
-    Run Mistral OCR on a document URL (HTML or PDF).
-    Returns extracted markdown text.
-    """
-    log.info(f"Running OCR on: {url}")
-    try:
-        response = mistral_client.ocr.process(
-            model="mistral-ocr-latest",
-            document={"type": "document_url", "document_url": url},
-        )
-        pages = [page.markdown for page in response.pages]
-        if max_pages:
-            pages = pages[:max_pages]
-        return "\n\n".join(pages)
-    except Exception as e:
-        log.warning(f"Mistral OCR failed for {url}: {e}")
+        log.warning(f"HTML extraction failed for {url}: {e}")
         return ""
 
 
+def extract_pdf(url: str, max_pages: int | None = None) -> str:
+    """
+    Fallback for PDF filings: fetch content and run Mistral OCR.
+    Only used when the primary document is a .pdf file.
+    """
+    log.info(f"Running Mistral OCR on PDF: {url}")
+    try:
+        import base64
+        resp = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        resp.raise_for_status()
+        content_b64 = base64.b64encode(resp.content).decode("utf-8")
+        ocr_resp = mistral_client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "document_url",
+                "document_url": f"data:application/pdf;base64,{content_b64}",
+            },
+        )
+        pages = [p.markdown for p in ocr_resp.pages]
+        if max_pages:
+            pages = pages[:max_pages]
+        text = "\n\n".join(pages)
+        log.info(f"OCR extracted {len(text):,} chars from PDF")
+        return text
+    except Exception as e:
+        log.warning(f"PDF OCR failed for {url}: {e}")
+        return ""
+
+
+def extract_document(
+    url: str,
+    max_chars: int | None = None,
+    max_pages: int | None = None,
+) -> str:
+    """
+    Extract text from a filing document.
+    Uses BeautifulSoup for HTML, Mistral OCR for PDFs.
+    """
+    if not url:
+        return ""
+    if url.lower().endswith(".pdf"):
+        return extract_pdf(url, max_pages=max_pages)
+    return extract_html(url, max_chars=max_chars)
+
+
 def enrich_filings(
-    filings: list[EdgarFiling], max_pages: int | None = None
+    filings: list[EdgarFiling],
+    max_chars: int | None = None,
+    max_pages: int | None = None,
 ) -> list[EdgarFiling]:
-    """
-    Resolve primary doc URL and run OCR for each filing.
-    Falls back to filing summary text if OCR fails.
-    """
+    """Extract text content for each filing."""
     for filing in filings:
         log.info(f"Enriching {filing.ticker} {filing.form_type}")
-        doc_url = get_primary_doc_url(filing)
-        if doc_url:
-            filing.pdf_url = doc_url
-            markdown = ocr_document(doc_url, max_pages=max_pages)
-            if markdown:
-                filing.document_markdown = markdown
-                log.info(
-                    f"OCR complete: {filing.ticker} {filing.form_type} "
-                    f"({len(markdown):,} chars)"
-                )
-                continue
+        if not filing.pdf_url:
+            log.warning(f"No document URL for {filing.ticker} — skipping")
+            filing.document_markdown = f"No content for {filing.ticker} {filing.form_type}"
+            continue
 
-        # Fallback: use filing URL directly
-        log.warning(
-            f"Falling back to direct OCR for {filing.ticker} — "
-            "no primary doc found"
+        text = extract_document(
+            filing.pdf_url,
+            max_chars=max_chars,
+            max_pages=max_pages,
         )
-        markdown = ocr_document(filing.filing_url, max_pages=max_pages)
-        filing.document_markdown = markdown or f"No content extracted for {filing.ticker} {filing.form_type}"
+        filing.document_markdown = text or f"No content extracted for {filing.ticker}"
 
     return filings
 
@@ -437,7 +488,7 @@ def ingest(
     tickers: list[str],
     form_type: str = "10-Q",
     k: int = 1,
-    max_pages: int | None = None,
+    max_chars: int | None = 50000,
 ) -> None:
     """
     Full ingestion pipeline for a list of tickers.
@@ -446,7 +497,7 @@ def ingest(
         tickers:    List of ticker symbols e.g. ["AAPL", "MSFT"]
         form_type:  SEC form type e.g. "10-K", "10-Q"
         k:          Number of filings per ticker to ingest
-        max_pages:  Cap OCR pages per filing (useful during development)
+        max_chars:  Cap extracted characters per filing (default: 50000)
     """
     chroma = PersistentClient(path=DB_NAME)
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
@@ -467,10 +518,10 @@ def ingest(
 
         log.info(f"{ticker}: {len(new_filings)} new filing(s) to process")
 
-        # OCR
-        new_filings = enrich_filings(new_filings, max_pages=max_pages)
+        # Extract text
+        new_filings = enrich_filings(new_filings, max_chars=max_chars)
 
-        # Chunk (parallel)
+        # Chunk and store
         for filing in new_filings:
             chunks = process_filing(filing)
             store_chunks(chunks, filing)
@@ -495,13 +546,13 @@ if __name__ == "__main__":
         help="Number of filings per ticker (default: 1)"
     )
     parser.add_argument(
-        "--max-pages", type=int, default=None,
-        help="Cap OCR pages per filing — useful during development"
+        "--max-chars", type=int, default=50000,
+        help="Cap extracted characters per filing (default: 50000)"
     )
     args = parser.parse_args()
     ingest(
         tickers=args.tickers,
         form_type=args.form_type,
         k=args.k,
-        max_pages=args.max_pages,
+        max_chars=args.max_chars,
     )

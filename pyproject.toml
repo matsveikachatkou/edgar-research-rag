@@ -6,9 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "arxiv>=4.0.0",
+    "beautifulsoup4>=4.14.3",
     "chromadb>=1.5.9",
     "gradio>=6.15.2",
     "litellm>=1.86.2",
+    "lxml>=6.1.1",
     "mistralai>=1.0.0",
     "openai>=2.38.0",
     "pydantic>=2.13.4",
