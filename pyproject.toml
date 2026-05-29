@@ -1,0 +1,21 @@
+[project]
+name = "edgar-research-rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "arxiv>=4.0.0",
+    "chromadb>=1.5.9",
+    "gradio>=6.15.2",
+    "litellm>=1.86.2",
+    "mistralai>=2.4.8",
+    "openai>=2.38.0",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "tenacity>=9.1.4",
+    "tqdm>=4.67.3",
+]
+
+[tool.uv]
+required-environments = [ "sys_platform == 'darwin' and platform_machine == 'x86_64'",]
