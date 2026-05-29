@@ -21,12 +21,13 @@ import warnings
 import time
 from multiprocessing import Pool
 from pathlib import Path
+import asyncio
 
 import requests
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from chromadb import PersistentClient
 from dotenv import load_dotenv
-from litellm import completion
+from litellm import completion, acompletion
 from openai import OpenAI
 from tenacity import retry, wait_exponential
 
@@ -357,7 +358,11 @@ def enrich_filings(
     return filings
 
 
-# Step 3 — LLM chunking
+# Step 3 — LLM chunking (async)
+
+BATCH_SIZE = 8000
+BATCH_OVERLAP = 500
+AVERAGE_CHUNK_SIZE = 800
 
 
 def _make_chunk_prompt(filing: EdgarFiling) -> str:
@@ -399,11 +404,11 @@ def _make_messages(filing: EdgarFiling) -> list[dict]:
     return [{"role": "user", "content": _make_chunk_prompt(filing)}]
 
 
-BATCH_SIZE = 8000  # chars per batch, safe for gpt-4.1-mini context
-BATCH_OVERLAP = 500  # overlap between batches to avoid cutting mid-sentence
-
-
-def split_into_batches(text: str, batch_size: int = BATCH_SIZE, overlap: int = BATCH_OVERLAP) -> list[str]:
+def split_into_batches(
+    text: str,
+    batch_size: int = BATCH_SIZE,
+    overlap: int = BATCH_OVERLAP,
+) -> list[str]:
     """Split a long document into overlapping batches for LLM chunking."""
     if len(text) <= batch_size:
         return [text]
@@ -423,55 +428,59 @@ def split_into_batches(text: str, batch_size: int = BATCH_SIZE, overlap: int = B
     return batches
 
 
-@retry(wait=WAIT)
-def process_batch(batch_text: str, filing: EdgarFiling, batch_num: int) -> list[Result]:
-    """Chunk a single batch of filing text via LLM."""
-    batch_filing = filing.model_copy()
-    batch_filing.document_markdown = batch_text
-    messages = _make_messages(batch_filing)
-    response = completion(
-        model=MODEL,
-        messages=messages,
-        response_format=Chunks,
-    )
-    reply = response.choices[0].message.content
-    doc_chunks = Chunks.model_validate_json(reply).chunks
-    results = [chunk.as_result(filing) for chunk in doc_chunks]
-    log.info(f"Batch {batch_num}: {len(results)} chunks")
-    return results
+async def process_batch_async(
+    batch_text: str, filing: EdgarFiling, batch_num: int, semaphore: asyncio.Semaphore
+) -> list[Result]:
+    """Chunk a single batch asynchronously with concurrency control."""
+    async with semaphore:
+        batch_filing = filing.model_copy()
+        batch_filing.document_markdown = batch_text
+        messages = _make_messages(batch_filing)
+        try:
+            response = await acompletion(
+                model=MODEL,
+                messages=messages,
+                response_format=Chunks,
+                timeout=120,
+            )
+            reply = response.choices[0].message.content
+            doc_chunks = Chunks.model_validate_json(reply).chunks
+            results = [chunk.as_result(filing) for chunk in doc_chunks]
+            log.info(f"Batch {batch_num}: {len(results)} chunks")
+            return results
+        except Exception as e:
+            log.error(f"Batch {batch_num} failed: {e}")
+            return []
 
 
-def process_filing(filing: EdgarFiling) -> list[Result]:
-    """Chunk a filing via LLM using batched processing."""
+async def process_filing_async(filing: EdgarFiling) -> list[Result]:
+    """Chunk a filing using concurrent async batch processing."""
     if not filing.document_markdown:
         log.warning(f"No content for {filing.ticker} — skipping")
         return []
 
-    log.info(f"Chunking {filing.ticker} {filing.form_type} ({len(filing.document_markdown):,} chars)")
+    log.info(
+        f"Chunking {filing.ticker} {filing.form_type} "
+        f"({len(filing.document_markdown):,} chars)"
+    )
     batches = split_into_batches(filing.document_markdown)
-    all_results: list[Result] = []
+    log.info(f"Processing {len(batches)} batches concurrently")
 
-    for i, batch in enumerate(batches, 1):
-        try:
-            results = process_batch(batch, filing, batch_num=i)
-            all_results.extend(results)
-            time.sleep(3)
-        except Exception as e:
-            log.error(f"Batch {i} failed for {filing.ticker}: {e}")
-            continue
-
-    log.info(f"Total chunks for {filing.ticker}: {len(all_results)}")
-    return all_results
-
-
-def create_chunks(filings: list[EdgarFiling]) -> list[Result]:
-    """Chunk all filings using parallel workers."""
-    all_chunks: list[Result] = []
-    with Pool(processes=WORKERS) as pool:
-        for results in pool.imap_unordered(process_filing, filings):
-            all_chunks.extend(results)
+    # Limit to 3 concurrent requests to stay within rate limits
+    semaphore = asyncio.Semaphore(3)
+    tasks = [
+        process_batch_async(batch, filing, i + 1, semaphore)
+        for i, batch in enumerate(batches)
+    ]
+    results = await asyncio.gather(*tasks)
+    all_chunks = [chunk for batch_result in results for chunk in batch_result]
+    log.info(f"Total chunks for {filing.ticker}: {len(all_chunks)}")
     return all_chunks
 
+
+def process_filing(filing: EdgarFiling) -> list[Result]:
+    """Sync wrapper around async filing processor."""
+    return asyncio.run(process_filing_async(filing))
 
 # Step 4 — Embed and store in ChromaDB (incremental)
 
