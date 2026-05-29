@@ -32,8 +32,8 @@ COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
 WAIT = wait_exponential(multiplier=1, min=10, max=240)
 
-RETRIEVAL_K = 10
-FINAL_K = 5
+RETRIEVAL_K = 15
+FINAL_K = 8
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 chroma = PersistentClient(path=DB_NAME)
@@ -235,13 +235,14 @@ def fetch_context(
     question: str,
     ticker: str | None = None,
     period: str | None = None,
+    final_k: int = FINAL_K,
 ) -> list[Result]:
     rewritten = rewrite_query(question)
     chunks_original = fetch_chunks(question, ticker=ticker, period=period)
     chunks_rewritten = fetch_chunks(rewritten, ticker=ticker, period=period)
     merged = merge_chunks(chunks_original, chunks_rewritten)
     reranked = rerank(question, merged)
-    return reranked[:FINAL_K]
+    return reranked[:final_k]
 
 
 @retry(wait=WAIT)

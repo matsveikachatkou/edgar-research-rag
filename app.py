@@ -173,10 +173,14 @@ def generate_recommendation(ticker: str, period: str) -> str:
 
         rec = recommender.recommend(ticker=ticker, summary=summary, chunks=chunks)
 
-        rec_color = {"buy": "BUY", "hold": "HOLD", "sell": "SELL"}.get(rec.recommendation, rec.recommendation.upper())
+        rec_label = {
+                    "buy": '<span style="color: #22c55e; font-weight: bold;">BUY</span>',
+                    "hold": '<span style="color: #eab308; font-weight: bold;">HOLD</span>',
+                    "sell": '<span style="color: #ef4444; font-weight: bold;">SELL</span>',
+                }.get(rec.recommendation, rec.recommendation.upper())
         return f"""## {ticker} — {period}
 
-**Recommendation: {rec_color}** ({rec.confidence:.0%} confidence)
+**Recommendation:** {rec_label} ({rec.confidence:.0%} confidence)
 
 **Rationale:** {rec.rationale}
 
@@ -190,6 +194,15 @@ def generate_recommendation(ticker: str, period: str) -> str:
 *Based on {len(chunks)} chunks from {ticker} {period} filing*"""
     except Exception as e:
         return f"Error generating recommendation: {e}"
+
+
+def send_recommendation_to_chat(rec_text: str, rec_ticker_val: str, history: list):
+    if not rec_text or rec_text.startswith("*Select"):
+        return history, ""
+    history = (history or []) + [
+        {"role": "assistant", "content": f"**Recommendation loaded:**\n\n{rec_text}\n\nYou can now ask follow-up questions about this recommendation."}
+    ]
+    return history, rec_ticker_val
 
 
 # Tab 1 — Research Chat
@@ -338,10 +351,10 @@ with gr.Blocks(
                             scale=5,
                         )
                         ticker_filter = gr.Textbox(
-                            placeholder="Ticker (optional)",
+                            placeholder="Ticker (clear for cross-company search)",
                             show_label=False,
-                            scale=2,
-                            min_width=120,
+                            scale=4,
+                            min_width=150,
                         )
                     clear = gr.ClearButton([msg, chatbot])
                 with gr.Column(scale=2):
@@ -385,6 +398,7 @@ with gr.Blocks(
             rec_output = gr.Markdown(
                 "*Select a ticker and period, then click Generate Recommendation.*"
             )
+            send_to_chat_btn = gr.Button("Send to chat", variant="secondary")
 
             def update_periods(ticker):
                 periods = get_periods_for_ticker(ticker)
@@ -405,6 +419,11 @@ with gr.Blocks(
             ).then(
                 fn=lambda: (gr.Button(interactive=True), ""),
                 outputs=[rec_btn, rec_status],
+            )
+            send_to_chat_btn.click(
+                send_recommendation_to_chat,
+                inputs=[rec_output, rec_ticker, chatbot],
+                outputs=[chatbot, ticker_filter],
             )
 
         # Tab 2: Pipeline
