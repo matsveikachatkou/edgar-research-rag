@@ -91,6 +91,34 @@ def format_memory(memory: list[ResearchOpportunity]) -> str:
     return "\n\n".join(lines)
 
 
+def get_coverage_table():
+    """Return coverage universe as a dataframe."""
+    try:
+        from chromadb import PersistentClient
+        from pathlib import Path
+        import pandas as pd
+        db = PersistentClient(path=str(Path("edgar_db")))
+        col = db.get_or_create_collection("edgar_filings")
+        if col.count() == 0:
+            return pd.DataFrame(columns=["Ticker", "Company", "Form", "Period", "Chunks"])
+        results = col.get()
+        seen = {}
+        for meta in results["metadatas"]:
+            key = f"{meta.get('ticker')}_{meta.get('form_type')}_{meta.get('period_of_report')}"
+            if key not in seen:
+                seen[key] = {
+                    "Ticker": meta.get("ticker", ""),
+                    "Company": meta.get("company_name", ""),
+                    "Form": meta.get("form_type", ""),
+                    "Period": meta.get("period_of_report", ""),
+                    "Chunks": 0,
+                }
+            seen[key]["Chunks"] += 1
+        return pd.DataFrame(seen.values())
+    except Exception:
+        return pd.DataFrame(columns=["Ticker", "Company", "Form", "Period", "Chunks"])
+
+
 # Tab 1 — Research Chat
 
 
@@ -205,6 +233,10 @@ def run_eval(ticker_input: str, custom_questions: str):
 
 with gr.Blocks(
     title="EDGAR Research RAG",
+    css="""
+        * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important; }
+        .gradio-container { max-width: 1400px !important; }
+        """
 ) as app:
     gr.Markdown("#EDGAR Research RAG")
     gr.Markdown(
@@ -217,27 +249,33 @@ with gr.Blocks(
         # Tab 1: Research Chat
         with gr.Tab("Research Chat"):
             with gr.Row():
+                coverage_table = gr.Dataframe(
+                    value=get_coverage_table(),
+                    label="Coverage universe — filings available in the vector store",
+                    interactive=False,
+                    wrap=True,
+                )
+            with gr.Row():
                 with gr.Column(scale=3):
-                    chatbot = gr.Chatbot(height=500)
+                    chatbot = gr.Chatbot(height=450)
                     with gr.Row():
                         msg = gr.Textbox(
                             placeholder="Ask about any ingested company...",
                             show_label=False,
-                            scale=4,
+                            scale=5,
                         )
                         ticker_filter = gr.Textbox(
-                            placeholder="Ticker filter (optional)",
+                            placeholder="Ticker (optional)",
                             show_label=False,
-                            scale=1,
+                            scale=2,
+                            min_width=120,
                         )
                     clear = gr.ClearButton([msg, chatbot])
-
                 with gr.Column(scale=2):
                     gr.Markdown("### Retrieved Sources")
                     sources_display = gr.Markdown(
                         "*Sources will appear here after you ask a question.*"
                     )
-
             def respond(user_message, ticker_filter, history):
                 history, sources = chat(user_message, ticker_filter, history or [])
                 return "", history, sources
