@@ -284,7 +284,7 @@ def extract_html(url: str, max_chars: int | None = None) -> str:
         return ""
 
 
-def extract_pdf(url: str, max_pages: int | None = None) -> str:
+def extract_pdf(url: str) -> str:
     """PDF extraction not implemented — add Mistral OCR here if needed."""
     log.warning(f"PDF extraction not supported: {url}")
     return ""
@@ -309,7 +309,6 @@ def extract_document(
 def enrich_filings(
     filings: list[EdgarFiling],
     max_chars: int | None = None,
-    max_pages: int | None = None,
 ) -> list[EdgarFiling]:
     """Extract text content for each filing."""
     for filing in filings:
@@ -322,7 +321,6 @@ def enrich_filings(
         text = extract_document(
             filing.pdf_url,
             max_chars=max_chars,
-            max_pages=max_pages,
         )
         filing.document_markdown = text or f"No content extracted for {filing.ticker}"
 

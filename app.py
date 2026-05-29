@@ -118,21 +118,20 @@ def chat(user_message: str, ticker_filter: str, history: list[dict]):
 # Tab 2 — Pipeline
 
 
-def run_pipeline(tickers_input: str, form_type: str, max_pages_input: int):
-    """Run the research pipeline and stream log output."""
+def run_pipeline(tickers_input: str, form_type: str, max_chars_input: int):
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
     if not tickers:
-        yield "Please enter at least one ticker.", ""
+        yield "Warning: Please enter at least one ticker.", ""
         return
 
-    max_pages = int(max_pages_input) if max_pages_input else None
+    max_chars = int(max_chars_input) if max_chars_input else 15000
     yield f"Starting pipeline for {', '.join(tickers)}...\n", ""
 
     try:
         framework = ResearchFramework(
             tickers=tickers,
             form_types=[form_type],
-            max_pages=max_pages,
+            max_chars=max_chars,
         )
         memory = framework.run(max_events=len(tickers))
         results_md = format_memory(memory)
@@ -265,9 +264,9 @@ with gr.Blocks(
                     label="Form type",
                     scale=1,
                 )
-                max_pages_input = gr.Number(
-                    label="Max OCR pages (blank = all)",
-                    value=20,
+                max_chars_input = gr.Number(
+                    label="Max chars per filing",
+                    value=15000,
                     scale=1,
                 )
 
@@ -279,7 +278,7 @@ with gr.Blocks(
 
             run_btn.click(
                 run_pipeline,
-                [tickers_input, form_type_input, max_pages_input],
+                [tickers_input, form_type_input, max_chars_input],
                 [pipeline_status, results_display],
             )
 

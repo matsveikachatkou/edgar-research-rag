@@ -11,7 +11,7 @@ Pipeline:
 Usage:
     uv run python research_framework.py
     uv run python research_framework.py --tickers AAPL MSFT --form-type 10-Q
-    uv run python research_framework.py --tickers NVDA --max-pages 20
+    uv run python research_framework.py --tickers NVDA --max-chars 15000
 """
 
 import argparse
@@ -94,11 +94,11 @@ class ResearchFramework:
         self,
         tickers: list[str] | None = None,
         form_types: list[str] | None = None,
-        max_pages: int | None = None,
+        max_chars: int | None = 15000,
     ):
         self.tickers = tickers
         self.form_types = form_types or ["10-Q"]
-        self.max_pages = max_pages
+        self.max_chars = max_chars
         self.memory = read_memory()
 
         self.scanner = ScannerAgent(tickers=tickers)
@@ -126,7 +126,7 @@ class ResearchFramework:
                 tickers=[event.ticker],
                 form_type=event.form_type,
                 k=1,
-                max_pages=self.max_pages,
+                max_chars=self.max_chars,
             )
         except Exception as e:
             log.error(f"Ingestion failed for {event.ticker}: {e}")
@@ -281,8 +281,8 @@ if __name__ == "__main__":
         help="SEC form type: 10-K or 10-Q (default: 10-Q)"
     )
     parser.add_argument(
-        "--max-pages", type=int, default=None,
-        help="Cap OCR pages per filing (saves cost during development)"
+        "--max-chars", type=int, default=15000,
+        help="Cap extracted characters per filing (default: 15000)"
     )
     parser.add_argument(
         "--max-events", type=int, default=3,
@@ -297,7 +297,7 @@ if __name__ == "__main__":
     framework = ResearchFramework(
         tickers=args.tickers,
         form_types=[args.form_type],
-        max_pages=args.max_pages,
+        max_chars=args.max_chars,
     )
 
     if args.summary:
