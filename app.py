@@ -118,6 +118,79 @@ def get_coverage_table():
     except Exception:
         return pd.DataFrame(columns=["Ticker", "Company", "Form", "Period", "Chunks"])
 
+def get_periods_for_ticker(ticker: str) -> list[str]:
+    """Get available filing periods for a ticker from the vector store."""
+    try:
+        from chromadb import PersistentClient
+        from pathlib import Path
+        db = PersistentClient(path=str(Path("edgar_db")))
+        col = db.get_or_create_collection("edgar_filings")
+        if col.count() == 0:
+            return []
+        results = col.get(where={"ticker": ticker.upper()})
+        periods = sorted(set(
+            m.get("period_of_report", "")
+            for m in results["metadatas"]
+            if m.get("period_of_report")
+        ), reverse=True)
+        return periods
+    except Exception:
+        return []
+
+
+def get_available_tickers() -> list[str]:
+    """Get list of ingested tickers."""
+    try:
+        from chromadb import PersistentClient
+        from pathlib import Path
+        db = PersistentClient(path=str(Path("edgar_db")))
+        col = db.get_or_create_collection("edgar_filings")
+        if col.count() == 0:
+            return []
+        results = col.get()
+        return sorted(set(m.get("ticker", "") for m in results["metadatas"] if m.get("ticker")))
+    except Exception:
+        return []
+
+
+def generate_recommendation(ticker: str, period: str) -> str:
+    """Generate a recommendation for a specific ticker and filing period."""
+    if not ticker or not period:
+        return "Please select a ticker and period."
+    try:
+        from agents.research_agent import ResearchAgent
+        from agents.recommend_agent import RecommendAgent
+        researcher = ResearchAgent()
+        recommender = RecommendAgent()
+
+        summary, chunks = researcher.research(
+            ticker=ticker,
+            focus="investment outlook, revenue trends, key risks",
+            period=period,
+        )
+        if not chunks:
+            return f"No data found for {ticker} {period}. Please ingest this filing first."
+
+        rec = recommender.recommend(ticker=ticker, summary=summary, chunks=chunks)
+
+        rec_color = {"buy": "BUY", "hold": "HOLD", "sell": "SELL"}.get(rec.recommendation, rec.recommendation.upper())
+        return f"""## {ticker} — {period}
+
+**Recommendation: {rec_color}** ({rec.confidence:.0%} confidence)
+
+**Rationale:** {rec.rationale}
+
+**Key risks:**
+{chr(10).join(f'- {r}' for r in rec.key_risks)}
+
+**Key opportunities:**
+{chr(10).join(f'- {o}' for o in rec.key_opportunities)}
+
+---
+*Based on {len(chunks)} chunks from {ticker} {period} filing*"""
+    except Exception as e:
+        return f"Error generating recommendation: {e}"
+
 
 # Tab 1 — Research Chat
 
@@ -279,11 +352,59 @@ with gr.Blocks(
             def respond(user_message, ticker_filter, history):
                 history, sources = chat(user_message, ticker_filter, history or [])
                 return "", history, sources
-
             msg.submit(
                 respond,
                 [msg, ticker_filter, chatbot],
                 [msg, chatbot, sources_display],
+            )
+
+            gr.Markdown("---")
+            gr.Markdown("### On-demand recommendation")
+            gr.Markdown("Generate a structured recommendation from a specific filing already in the vector store.")
+            with gr.Row():
+                rec_ticker = gr.Dropdown(
+                    choices=get_available_tickers(),
+                    label="Ticker",
+                    scale=1,
+                )
+
+                initial_ticker = get_available_tickers()
+
+                rec_period = gr.Dropdown(
+                    choices=get_periods_for_ticker(initial_ticker[0]) if initial_ticker else [],
+                    label="Filing period",
+                    scale=1,
+                    value=get_periods_for_ticker(initial_ticker[0])[0] if initial_ticker else None,
+                )
+                rec_btn = gr.Button(
+                    "Generate Recommendation",
+                    variant="primary",
+                    scale=1,
+                )
+            rec_status = gr.Markdown("")
+            rec_output = gr.Markdown(
+                "*Select a ticker and period, then click Generate Recommendation.*"
+            )
+
+            def update_periods(ticker):
+                periods = get_periods_for_ticker(ticker)
+                return gr.Dropdown(choices=periods, value=periods[0] if periods else None)
+
+            rec_ticker.change(
+                update_periods,
+                inputs=[rec_ticker],
+                outputs=[rec_period],
+            )
+            rec_btn.click(
+                lambda: "Generating recommendation...",
+                outputs=[rec_status],
+            ).then(
+                generate_recommendation,
+                inputs=[rec_ticker, rec_period],
+                outputs=[rec_output],
+            ).then(
+                lambda: "",
+                outputs=[rec_status],
             )
 
         # Tab 2: Pipeline
@@ -304,8 +425,8 @@ with gr.Blocks(
                     scale=1,
                 )
                 max_chars_input = gr.Number(
-                    label="Max chars per filing",
-                    value=15000,
+                    label="Max chars per filing (blank = no limit)",
+                    value=None,
                     scale=1,
                 )
 

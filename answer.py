@@ -32,8 +32,8 @@ COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
 WAIT = wait_exponential(multiplier=1, min=10, max=240)
 
-RETRIEVAL_K = 20
-FINAL_K = 10
+RETRIEVAL_K = 10
+FINAL_K = 5
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 chroma = PersistentClient(path=DB_NAME)
@@ -105,14 +105,25 @@ def embed_query(text: str) -> list[float]:
 def fetch_chunks(
     query: str,
     ticker: str | None = None,
+    period: str | None = None,
     k: int = RETRIEVAL_K,
 ) -> list[Result]:
     """
     Retrieve top-k chunks from ChromaDB.
-    Optionally filter by ticker for company-specific retrieval.
+    Optionally filter by ticker and/or period_of_report.
     """
     query_vec = embed_query(query)
-    where = {"ticker": ticker.upper()} if ticker else None
+
+    # Build where filter
+    if ticker and period:
+        where = {"$and": [
+            {"ticker": {"$eq": ticker.upper()}},
+            {"period_of_report": {"$eq": period}},
+        ]}
+    elif ticker:
+        where = {"ticker": {"$eq": ticker.upper()}}
+    else:
+        where = None
 
     try:
         results = collection.query(
@@ -121,7 +132,6 @@ def fetch_chunks(
             where=where,
         )
     except Exception:
-        # Fallback without filter if ticker filter fails
         results = collection.query(
             query_embeddings=[query_vec],
             n_results=min(k, collection.count() or 1),
@@ -170,7 +180,7 @@ def rerank(question: str, chunks: list[Result]) -> list[Result]:
         form = chunk.metadata.get("form_type", "")
         user_prompt += (
             f"# CHUNK ID: {idx + 1} [{ticker} {form}]:\n\n"
-            f"{chunk.page_content[:600]}\n\n"
+            f"{chunk.page_content[:300]}\n\n"
         )
     user_prompt += "Reply only with the list of ranked chunk ids."
 
@@ -179,7 +189,8 @@ def rerank(question: str, chunks: list[Result]) -> list[Result]:
         {"role": "user", "content": user_prompt},
     ]
     response = completion(
-        model=MODEL, messages=messages, response_format=RankOrder
+        model=MODEL, messages=messages, response_format=RankOrder,
+        timeout=60,
     )
     reply = response.choices[0].message.content
     order = RankOrder.model_validate_json(reply).order
@@ -223,14 +234,11 @@ def make_rag_messages(
 def fetch_context(
     question: str,
     ticker: str | None = None,
+    period: str | None = None,
 ) -> list[Result]:
-    """
-    Full retrieval pipeline:
-    rewrite → dual fetch → merge → rerank → top FINAL_K
-    """
     rewritten = rewrite_query(question)
-    chunks_original = fetch_chunks(question, ticker=ticker)
-    chunks_rewritten = fetch_chunks(rewritten, ticker=ticker)
+    chunks_original = fetch_chunks(question, ticker=ticker, period=period)
+    chunks_rewritten = fetch_chunks(rewritten, ticker=ticker, period=period)
     merged = merge_chunks(chunks_original, chunks_rewritten)
     reranked = rerank(question, merged)
     return reranked[:FINAL_K]
@@ -241,20 +249,10 @@ def answer_question(
     question: str,
     history: list[dict] | None = None,
     ticker: str | None = None,
+    period: str | None = None,
 ) -> tuple[str, list[Result]]:
-    """
-    Answer a question using RAG over ingested SEC filings.
-
-    Args:
-        question:   The user's question
-        history:    Conversation history as list of {role, content} dicts
-        ticker:     Optional ticker to restrict retrieval to one company
-
-    Returns:
-        (answer_text, retrieved_chunks)
-    """
     history = history or []
-    chunks = fetch_context(question, ticker=ticker)
+    chunks = fetch_context(question, ticker=ticker, period=period)
 
     if not chunks:
         return (

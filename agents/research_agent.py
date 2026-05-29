@@ -36,6 +36,7 @@ class ResearchAgent(Agent):
         ticker: str,
         focus: str = "investment outlook",
         history: list[dict] | None = None,
+        period: str | None = None,
     ) -> tuple[str, list[Result]]:
         """
         Produce a research summary for a ticker using RAG.
@@ -44,11 +45,12 @@ class ResearchAgent(Agent):
             ticker:  Company ticker symbol e.g. "AAPL"
             focus:   Research focus area
             history: Optional conversation history for follow-ups
+            period:  Optional period_of_report to restrict to specific filing
 
         Returns:
             (summary_text, retrieved_chunks)
         """
-        self.log(f"Researching {ticker} — focus: {focus}")
+        self.log(f"Researching {ticker} — focus: {focus}{' | period: ' + period if period else ''}")
 
         question = (
             f"Based on the most recent SEC filing for {ticker}, "
@@ -61,6 +63,7 @@ class ResearchAgent(Agent):
             question=question,
             history=history or [],
             ticker=ticker,
+            period=period,
         )
 
         if not chunks:
