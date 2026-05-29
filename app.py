@@ -396,15 +396,15 @@ with gr.Blocks(
                 outputs=[rec_period],
             )
             rec_btn.click(
-                lambda: "Generating recommendation...",
-                outputs=[rec_status],
+                fn=lambda: (gr.Button(interactive=False), "Generating recommendation..."),
+                outputs=[rec_btn, rec_status],
             ).then(
                 generate_recommendation,
                 inputs=[rec_ticker, rec_period],
                 outputs=[rec_output],
             ).then(
-                lambda: "",
-                outputs=[rec_status],
+                fn=lambda: (gr.Button(interactive=True), ""),
+                outputs=[rec_btn, rec_status],
             )
 
         # Tab 2: Pipeline
