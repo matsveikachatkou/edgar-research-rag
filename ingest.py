@@ -2,14 +2,14 @@
 ingest.py — SEC EDGAR ingestion pipeline.
 
 Pipeline:
-    1. Fetch recent filings from SEC EDGAR full-text search API
-    2. Convert PDFs to markdown via Mistral OCR
+    1. Fetch recent filings from SEC EDGAR submissions API
+    2. Extract text from HTML filings via BeautifulSoup
     3. Chunk documents semantically via LLM
     4. Embed chunks and store in ChromaDB (incremental — no delete on rerun)
 
 Usage:
     uv run python ingest.py --tickers AAPL MSFT --form-type 10-Q
-    uv run python ingest.py --tickers NVDA --form-type 10-K --max-pages 30
+    uv run python ingest.py --tickers NVDA --form-type 10-K --max-chars 15000
 """
 
 import argparse
@@ -26,7 +26,6 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from chromadb import PersistentClient
 from dotenv import load_dotenv
 from litellm import completion
-from mistralai.client import Mistral
 from openai import OpenAI
 from tenacity import retry, wait_exponential
 
@@ -57,7 +56,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-mistral_client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 
 SEC_HEADERS = {"User-Agent": "edgar-research-rag research@example.com"}
 
@@ -287,47 +285,24 @@ def extract_html(url: str, max_chars: int | None = None) -> str:
 
 
 def extract_pdf(url: str, max_pages: int | None = None) -> str:
-    """
-    Fallback for PDF filings: fetch content and run Mistral OCR.
-    Only used when the primary document is a .pdf file.
-    """
-    log.info(f"Running Mistral OCR on PDF: {url}")
-    try:
-        import base64
-        resp = requests.get(url, headers=SEC_HEADERS, timeout=30)
-        resp.raise_for_status()
-        content_b64 = base64.b64encode(resp.content).decode("utf-8")
-        ocr_resp = mistral_client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "document_url",
-                "document_url": f"data:application/pdf;base64,{content_b64}",
-            },
-        )
-        pages = [p.markdown for p in ocr_resp.pages]
-        if max_pages:
-            pages = pages[:max_pages]
-        text = "\n\n".join(pages)
-        log.info(f"OCR extracted {len(text):,} chars from PDF")
-        return text
-    except Exception as e:
-        log.warning(f"PDF OCR failed for {url}: {e}")
-        return ""
+    """PDF extraction not implemented — add Mistral OCR here if needed."""
+    log.warning(f"PDF extraction not supported: {url}")
+    return ""
 
 
 def extract_document(
     url: str,
     max_chars: int | None = None,
-    max_pages: int | None = None,
 ) -> str:
     """
     Extract text from a filing document.
-    Uses BeautifulSoup for HTML, Mistral OCR for PDFs.
+    Uses BeautifulSoup for HTML filings.
+    PDF support can be added via Mistral OCR if needed.
     """
     if not url:
         return ""
     if url.lower().endswith(".pdf"):
-        return extract_pdf(url, max_pages=max_pages)
+        return extract_pdf(url)
     return extract_html(url, max_chars=max_chars)
 
 

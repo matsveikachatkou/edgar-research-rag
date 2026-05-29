@@ -11,7 +11,6 @@ dependencies = [
     "gradio>=6.15.2",
     "litellm>=1.86.2",
     "lxml>=6.1.1",
-    "mistralai>=1.0.0",
     "openai>=2.38.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
