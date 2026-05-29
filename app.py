@@ -233,26 +233,25 @@ def chat(user_message: str, ticker_filter: str, history: list):
 # Tab 2 — Pipeline
 
 
-def run_pipeline(tickers_input: str, form_type: str, max_chars_input: int):
+def run_ingestion(tickers_input: str, form_type: str, k: int):
+    """Ingest filings into the vector store."""
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
     if not tickers:
-        yield "Warning: Please enter at least one ticker.", ""
+        yield "Warning: Please enter at least one ticker.", get_coverage_table()
         return
 
-    max_chars = int(max_chars_input) if max_chars_input else 15000
-    yield f"Starting pipeline for {', '.join(tickers)}...\n", ""
+    yield f"Starting ingestion for {', '.join(tickers)}...\n", get_coverage_table()
 
     try:
-        framework = ResearchFramework(
+        from ingest import ingest
+        ingest(
             tickers=tickers,
-            form_types=[form_type],
-            max_chars=max_chars,
+            form_type=form_type,
+            k=int(k) if k else 1,
         )
-        memory = framework.run(max_events=len(tickers))
-        results_md = format_memory(memory)
-        yield f"Pipeline complete — {len(memory)} total research record(s).\n", results_md
+        yield f"Ingestion complete — {', '.join(tickers)} added to vector store.\n", get_coverage_table()
     except Exception as e:
-        yield f"Pipeline error: {e}\n", ""
+        yield f"Ingestion error: {e}\n", get_coverage_table()
 
 
 # Tab 3 — Eval Dashboard
@@ -341,6 +340,11 @@ with gr.Blocks(
                     interactive=False,
                     wrap=True,
                 )
+                refresh_btn = gr.Button("Refresh", scale=0, min_width=100)
+            refresh_btn.click(
+                fn=get_coverage_table,
+                outputs=[coverage_table],
+            )
             with gr.Row():
                 with gr.Column(scale=3):
                     chatbot = gr.Chatbot(height=450)
@@ -409,6 +413,10 @@ with gr.Blocks(
                 inputs=[rec_ticker],
                 outputs=[rec_period],
             )
+            refresh_btn.click(
+                fn=lambda: gr.Dropdown(choices=get_available_tickers()),
+                outputs=[rec_ticker],
+            )
             rec_btn.click(
                 fn=lambda: (gr.Button(interactive=False), "Generating recommendation..."),
                 outputs=[rec_btn, rec_status],
@@ -426,10 +434,10 @@ with gr.Blocks(
                 outputs=[chatbot, ticker_filter],
             )
 
-        # Tab 2: Pipeline
-        with gr.Tab("Pipeline"):
+       # Tab 2: Data Ingestion
+        with gr.Tab("Data Ingestion"):
             gr.Markdown(
-                "Run the full pipeline: scan EDGAR → ingest → research → recommend"
+                "Add new SEC filings to the vector store. Once ingested, use Research Chat for Q&A and recommendations."
             )
             with gr.Row():
                 tickers_input = gr.Textbox(
@@ -443,22 +451,33 @@ with gr.Blocks(
                     label="Form type",
                     scale=1,
                 )
-                max_chars_input = gr.Number(
-                    label="Max chars per filing (blank = no limit)",
-                    value=None,
+                k_input = gr.Number(
+                    label="Filings per ticker",
+                    value=1,
                     scale=1,
                 )
 
-            run_btn = gr.Button("Run Pipeline", variant="primary")
+            run_btn = gr.Button("Ingest Filings", variant="primary")
             pipeline_status = gr.Textbox(
                 label="Status", lines=3, interactive=False
             )
-            results_display = gr.Markdown("*Results will appear here.*")
+            ingestion_results = gr.Dataframe(
+                value=get_coverage_table(),
+                label="Coverage universe after ingestion",
+                interactive=False,
+                wrap=True,
+            )
 
             run_btn.click(
-                run_pipeline,
-                [tickers_input, form_type_input, max_chars_input],
-                [pipeline_status, results_display],
+                fn=lambda: gr.Button(interactive=False),
+                outputs=[run_btn],
+            ).then(
+                run_ingestion,
+                inputs=[tickers_input, form_type_input, k_input],
+                outputs=[pipeline_status, ingestion_results],
+            ).then(
+                fn=lambda: gr.Button(interactive=True),
+                outputs=[run_btn],
             )
 
         # Tab 3: Eval Dashboard
@@ -483,9 +502,15 @@ with gr.Blocks(
             eval_display = gr.Markdown("*Evaluation results will appear here.*")
 
             eval_btn.click(
+                fn=lambda: gr.Button(interactive=False),
+                outputs=[eval_btn],
+            ).then(
                 run_eval,
-                [eval_ticker, eval_questions],
-                eval_display,
+                inputs=[eval_ticker, eval_questions],
+                outputs=[eval_display],
+            ).then(
+                fn=lambda: gr.Button(interactive=True),
+                outputs=[eval_btn],
             )
 
 

@@ -7,18 +7,15 @@ from pydantic import BaseModel, Field
 
 
 class EdgarFiling(BaseModel):
-    """A single SEC EDGAR filing fetched from RSS."""
+    """A single SEC EDGAR filing fetched from the EDGAR submissions API."""
     ticker: str
     company_name: str
     form_type: str                  # 10-K, 10-Q, 8-K, etc.
     filed_at: datetime
     period_of_report: Optional[str] = None
     filing_url: str                 # index page URL
-    pdf_url: Optional[str] = None   # direct PDF link if resolved
-    document_markdown: str = ""     # populated after OCR
-
-    class Config:
-        arbitrary_types_allowed = True
+    pdf_url: Optional[str] = None   # primary document URL (HTML or PDF)
+    document_markdown: str = ""     # populated after HTML extraction
 
 
 class Chunk(BaseModel):

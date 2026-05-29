@@ -16,10 +16,8 @@ import argparse
 import logging
 import os
 import sys
-import re
 import warnings
-import time
-from multiprocessing import Pool
+import re
 from pathlib import Path
 import asyncio
 
@@ -30,6 +28,7 @@ from dotenv import load_dotenv
 from litellm import completion, acompletion
 from openai import OpenAI
 from tenacity import retry, wait_exponential
+from datetime import datetime
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -44,8 +43,7 @@ MODEL = "openai/gpt-4.1-mini"
 DB_NAME = str(Path(__file__).parent / "edgar_db")
 COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
-AVERAGE_CHUNK_SIZE = 500
-WORKERS = 3
+
 WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
 
@@ -63,109 +61,6 @@ SEC_HEADERS = {"User-Agent": "edgar-research-rag research@example.com"}
 
 
 # Step 1 — Fetch filings from SEC EDGAR
-
-
-def fetch_filings(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
-    """
-    Fetch recent filings for a ticker from SEC EDGAR full-text search.
-    Returns up to k filings sorted by date descending.
-    """
-    log.info(f"Fetching {form_type} filings for {ticker}")
-
-    url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms={form_type}"
-    resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-
-    hits = data.get("hits", {}).get("hits", [])
-    if not hits:
-        log.warning(f"No {form_type} filings found for {ticker}")
-        return []
-
-    filings = []
-    for hit in hits[:k]:
-        src = hit.get("_source", {})
-        entity_name = src.get("entity_name", ticker)
-        file_date = src.get("file_date", "")
-        period = src.get("period_of_report", "")
-        accession_raw = hit.get("_id", "")
-        accession = accession_raw.replace("-", "")
-
-        # Build the filing index URL
-        cik = src.get("_id", accession_raw).split(":")[0] if ":" in accession_raw else ""
-        filing_url = src.get("file_date", "")
-
-        # Use the document URL directly from the hit
-        doc_url = ""
-        for doc in src.get("period_of_report", []) if isinstance(src.get("period_of_report"), list) else []:
-            if doc.endswith(".htm") or doc.endswith(".html"):
-                doc_url = doc
-                break
-
-        # Fallback: construct filing index from accession number
-        accession_fmt = accession_raw if accession_raw else ""
-        filing_index_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={ticker}&type={form_type}&dateb=&owner=include&count=10"
-
-        from datetime import datetime
-        try:
-            filed_dt = datetime.strptime(file_date, "%Y-%m-%d") if file_date else datetime.utcnow()
-        except ValueError:
-            filed_dt = datetime.utcnow()
-
-        filing = EdgarFiling(
-            ticker=ticker.upper(),
-            company_name=entity_name,
-            form_type=form_type,
-            filed_at=filed_dt,
-            period_of_report=period,
-            filing_url=filing_index_url,
-            pdf_url=None,
-        )
-        filings.append(filing)
-        log.info(f"Found filing: {entity_name} {form_type} filed {file_date}")
-
-    return filings
-
-
-def resolve_pdf_url(ticker: str, form_type: str) -> str | None:
-    """
-    Resolve the most recent PDF/document URL for a ticker+form_type
-    via the EDGAR full-text search API.
-    """
-    log.info(f"Resolving PDF URL for {ticker} {form_type}")
-    url = f"https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms={form_type}"
-    try:
-        resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
-        resp.raise_for_status()
-        hits = resp.json().get("hits", {}).get("hits", [])
-        if not hits:
-            return None
-
-        hit = hits[0]
-        src = hit.get("_source", {})
-
-        # Try to get direct document URLs from the filing
-        file_num = src.get("file_num", "")
-        accession = hit.get("_id", "")
-
-        # Construct accession-based index URL
-        if accession:
-            acc_clean = accession.replace("-", "")
-            # Extract CIK from entity_id if available
-            entity_id = src.get("entity_id", "")
-            if entity_id:
-                cik_padded = str(entity_id).zfill(10)
-                index_url = f"https://www.sec.gov/Archives/edgar/data/{entity_id}/{acc_clean}/{accession}-index.htm"
-                log.info(f"Filing index URL: {index_url}")
-                return index_url
-
-        return None
-    except Exception as e:
-        log.warning(f"Could not resolve PDF URL for {ticker}: {e}")
-        return None
-
-
-# CIK resolution
 
 
 _CIK_CACHE: dict[str, str] = {}
@@ -201,12 +96,11 @@ def resolve_cik(ticker: str) -> str | None:
         return None
 
 
-def fetch_filings_v2(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
+def fetch_filings(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
     """
     Fetch recent filings using the EDGAR submissions API.
     Resolves ticker to CIK dynamically via SEC's public mapping.
     """
-    from datetime import datetime
 
     cik = resolve_cik(ticker.upper())
     if not cik:
@@ -275,11 +169,6 @@ def fetch_filings_v2(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[E
     return filings
 
 
-def get_primary_doc_url(filing: EdgarFiling) -> str | None:
-    """Return the pre-resolved primary doc URL from the filing."""
-    return filing.pdf_url or None
-
-
 # Step 2 — Extract text from filings
 
 
@@ -292,7 +181,6 @@ def extract_html(url: str, max_chars: int | None = None) -> str:
     try:
         resp = requests.get(url, headers=SEC_HEADERS, timeout=30)
         resp.raise_for_status()
-        from bs4 import BeautifulSoup
         soup = BeautifulSoup(resp.content, "lxml")
 
         # Remove noise: scripts, styles, XBRL metadata
@@ -302,7 +190,6 @@ def extract_html(url: str, max_chars: int | None = None) -> str:
         text = soup.get_text(separator="\n", strip=True)
 
         # Collapse excessive blank lines
-        import re
         text = re.sub(r"\n{3,}", "\n\n", text)
 
         if max_chars:
@@ -560,7 +447,7 @@ def ingest(
 
     for ticker in tickers:
         log.info(f"--- Processing {ticker} ---")
-        filings = fetch_filings_v2(ticker, form_type=form_type, k=k)
+        filings = fetch_filings(ticker, form_type=form_type, k=k)
 
         if not filings:
             log.warning(f"No filings found for {ticker} — skipping")
