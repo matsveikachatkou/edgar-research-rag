@@ -5,7 +5,6 @@ Uses Pydantic structured output (not pipe-splitting) to produce
 a validated Recommendation with rationale, risks, and opportunities.
 """
 
-import os
 
 from dotenv import load_dotenv
 from litellm import completion
@@ -17,7 +16,7 @@ from models.research import Recommendation, Result
 load_dotenv(override=True)
 
 MODEL = "openai/gpt-4.1-mini"
-WAIT = wait_exponential(multiplier=1, min=10, max=240)
+WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
 
 class RecommendAgent(Agent):

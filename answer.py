@@ -3,12 +3,10 @@ answer.py — RAG retrieval and answer generation.
 
 Retrieval pipeline:
     1. Rewrite query (history-aware)
-    2. Dual retrieval: original + rewritten query
+    2. Dual retrieval: original + rewritten query, optionally filtered by ticker and period
     3. Merge and deduplicate chunks
     4. LLM rerank → top FINAL_K
     5. Generate grounded answer with citations
-
-Optionally filter by ticker for company-specific questions.
 """
 
 import os
@@ -30,7 +28,7 @@ MODEL = "openai/gpt-4.1-mini"
 DB_NAME = str(Path(__file__).parent / "edgar_db")
 COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
-WAIT = wait_exponential(multiplier=1, min=10, max=240)
+WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
 RETRIEVAL_K = 15
 FINAL_K = 8
@@ -252,6 +250,18 @@ def answer_question(
     ticker: str | None = None,
     period: str | None = None,
 ) -> tuple[str, list[Result]]:
+    """
+    Answer a question using RAG over ingested SEC filings.
+
+    Args:
+        question: The user's question
+        history:  Conversation history as list of {role, content} dicts
+        ticker:   Optional ticker to restrict retrieval to one company
+        period:   Optional period_of_report to restrict to a specific filing
+
+    Returns:
+        (answer_text, retrieved_chunks)
+    """
     history = history or []
     chunks = fetch_context(question, ticker=ticker, period=period)
 

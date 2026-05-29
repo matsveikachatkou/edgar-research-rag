@@ -1,8 +1,8 @@
 """
-agents/scanner_agent.py — Scans SEC EDGAR RSS for new filings.
+agents/scanner_agent.py — Scans SEC EDGAR for new filings.
 
-Uses the EDGAR full-text search API to find recent filings for
-watched tickers. Filters out already-processed filings via memory.
+Uses the EDGAR submissions API to find recent filings for watched tickers.
+Filters out already-processed filings via memory deduplication.
 
 Extend by swapping _fetch_events() with a different data source
 (e.g. Refinitiv, Bloomberg, European ESMA filings) while keeping
@@ -11,7 +11,6 @@ the SecuritiesEvent output contract unchanged.
 
 import os
 from datetime import datetime
-from typing import Optional
 
 import requests
 from dotenv import load_dotenv
@@ -22,7 +21,6 @@ from models.research import SecuritiesEvent
 load_dotenv(override=True)
 
 SEC_HEADERS = {"User-Agent": "edgar-research-rag research@example.com"}
-EDGAR_SEARCH = "https://efts.sec.gov/LATEST/search-index?q=%22{ticker}%22&forms={form_type}"
 
 
 class ScannerAgent(Agent):

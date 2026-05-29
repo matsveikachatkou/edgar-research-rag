@@ -52,8 +52,9 @@ class ResearchAgent(Agent):
         """
         self.log(f"Researching {ticker} — focus: {focus}{' | period: ' + period if period else ''}")
 
+        period_clause = f"for the period ending {period}" if period else "from the most recent SEC filing"
         question = (
-            f"Based on the most recent SEC filing for {ticker}, "
+            f"Based on the SEC filing for {ticker} {period_clause}, "
             f"provide a detailed analysis covering: {focus}. "
             f"Include specific figures, percentages, and direct references "
             f"to management commentary where available."
@@ -80,8 +81,9 @@ class ResearchAgent(Agent):
         self, ticker: str
     ) -> tuple[str, list[Result]]:
         """
-        Run research across all standard focus areas and
-        combine into a comprehensive summary.
+        Run research across all standard focus areas and combine into
+        a comprehensive summary. Not currently wired to the UI —
+        available for future deep-dive feature.
         """
         self.log(f"Running deep research for {ticker}")
         all_chunks: list[Result] = []

@@ -1,27 +1,21 @@
 """
-research_framework.py — Main orchestrator for the research pipeline.
+research_framework.py — CLI orchestrator for the automated research pipeline.
 
-Pipeline:
-    1. ScannerAgent finds new filings from EDGAR
-    2. ingest.py ingests them into ChromaDB
-    3. ResearchAgent produces a RAG-powered summary
-    4. RecommendAgent generates a structured recommendation
-    5. Results persisted to research_memory.json
+Runs the full scan → ingest → research → recommend pipeline from the command line.
+For interactive use, the Gradio UI (app.py) provides the same functionality
+with on-demand recommendations per ticker and filing period.
 
 Usage:
     uv run python research_framework.py
     uv run python research_framework.py --tickers AAPL MSFT --form-type 10-Q
-    uv run python research_framework.py --tickers NVDA --max-chars 15000
+    uv run python research_framework.py --summary
 """
 
 import argparse
 import json
 import logging
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -107,9 +101,7 @@ class ResearchFramework:
 
         log.info("Research Framework initialised")
 
-    def run_single(
-        self, event: SecuritiesEvent
-    ) -> Optional[ResearchOpportunity]:
+    def run_single(self, event: SecuritiesEvent) -> ResearchOpportunity | None:
         """
         Run the full pipeline for a single filing event.
         Returns a ResearchOpportunity or None if pipeline fails.

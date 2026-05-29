@@ -30,11 +30,11 @@ load_dotenv(override=True)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from answer import answer_question, fetch_context
+from answer import answer_question
 from models.research import EvalResult, EvalSample, Result
 
 MODEL = "openai/gpt-4.1-mini"
-WAIT = wait_exponential(multiplier=1, min=10, max=240)
+WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -227,6 +227,16 @@ def run_evaluation(
     questions: list[str],
     ticker: str | None = None,
 ) -> list[EvalResult]:
+    """
+    Run the full evaluation suite over a list of questions.
+
+    Args:
+        questions: List of evaluation questions
+        ticker:    Optional ticker to restrict retrieval
+
+    Returns:
+        List of EvalResult objects with precision, faithfulness, relevance scores
+    """
     results: list[EvalResult] = []
 
     for question in questions:
