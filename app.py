@@ -79,7 +79,7 @@ def format_memory(memory: list[ResearchOpportunity]) -> str:
         icon = REC_COLORS.get(opp.recommendation, "⚪")
         lines.append(
             f"### {icon} {opp.company_name} ({opp.ticker}) — {opp.form_type}\n\n"
-            f"**Period:** {opp.filed_at[:10]}  |  "
+            f"**Period:** {opp.period_of_report or opp.filed_at[:10]}  |  "
             f"**Researched:** {opp.researched_at[:10]}\n\n"
             f"**Recommendation:** `{opp.recommendation.upper()}` "
             f"({opp.confidence:.0%} confidence)\n\n"

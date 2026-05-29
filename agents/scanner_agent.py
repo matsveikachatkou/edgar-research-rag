@@ -46,59 +46,66 @@ class ScannerAgent(Agent):
         self.log(f"Watching tickers: {', '.join(self.watched_tickers)}")
 
     def _fetch_events(
-        self, ticker: str, form_type: str, k: int = 3
+        self, ticker: str, form_type: str, k: int = 1
     ) -> list[SecuritiesEvent]:
         """
-        Fetch recent filings for a single ticker from EDGAR search API.
-        Returns up to k SecuritiesEvent objects.
+        Fetch recent filings for a single ticker using EDGAR submissions API.
+        Always returns most recent filings first.
         """
-        url = EDGAR_SEARCH.format(ticker=ticker, form_type=form_type)
+        from ingest import resolve_cik
+
+        cik = resolve_cik(ticker)
+        if not cik:
+            self.log(f"Could not resolve CIK for {ticker} — skipping")
+            return []
+
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         try:
             resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
             resp.raise_for_status()
-            hits = resp.json().get("hits", {}).get("hits", [])
+            data = resp.json()
         except Exception as e:
-            self.log(f"EDGAR fetch failed for {ticker}: {e}")
+            self.log(f"Submissions API failed for {ticker}: {e}")
             return []
 
+        company_name = data.get("name", ticker)
+        filings_data = data.get("filings", {}).get("recent", {})
+        forms = filings_data.get("form", [])
+        dates = filings_data.get("filingDate", [])
+        accessions = filings_data.get("accessionNumber", [])
+        periods = filings_data.get("reportDate", [])
+
         events = []
-        for hit in hits[:k]:
-            src = hit.get("_source", {})
-            accession = hit.get("_id", "")
-            entity_name = src.get("entity_name", ticker)
-            file_date = src.get("file_date", "")
-            period = src.get("period_of_report", "")
-            entity_id = src.get("entity_id", "")
+        for i, form in enumerate(forms):
+            if form != form_type:
+                continue
+            if len(events) >= k:
+                break
+
+            cik_short = cik.lstrip("0")
+            acc_clean = accessions[i].replace("-", "")
+            filing_url = (
+                f"https://www.sec.gov/Archives/edgar/data/"
+                f"{cik_short}/{acc_clean}/{accessions[i]}-index.htm"
+            )
 
             try:
-                filed_dt = datetime.strptime(file_date, "%Y-%m-%d")
+                filed_dt = datetime.strptime(dates[i], "%Y-%m-%d")
             except Exception:
                 filed_dt = datetime.utcnow()
-
-            # Build filing index URL
-            if entity_id and accession:
-                acc_clean = accession.replace("-", "")
-                filing_url = (
-                    f"https://www.sec.gov/Archives/edgar/data/"
-                    f"{entity_id}/{acc_clean}/{accession}-index.htm"
-                )
-            else:
-                filing_url = (
-                    f"https://www.sec.gov/cgi-bin/browse-edgar?"
-                    f"action=getcompany&company={ticker}"
-                    f"&type={form_type}&dateb=&owner=include&count=5"
-                )
 
             events.append(
                 SecuritiesEvent(
                     ticker=ticker,
-                    company_name=entity_name,
+                    company_name=company_name,
                     form_type=form_type,
                     filed_at=filed_dt,
                     filing_url=filing_url,
-                    period_of_report=period,
+                    period_of_report=periods[i] if i < len(periods) else "",
                 )
             )
+            self.log(f"Found: {company_name} | {form_type} | filed {dates[i]}")
+
         return events
 
     def scan(

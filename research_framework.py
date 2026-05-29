@@ -168,6 +168,7 @@ class ResearchFramework:
             company_name=event.company_name,
             form_type=event.form_type,
             filed_at=event.filed_at.isoformat(),
+            period_of_report=event.period_of_report or "",
             recommendation=rec.recommendation,
             confidence=rec.confidence,
             rationale=rec.rationale,
@@ -252,7 +253,7 @@ class ResearchFramework:
             reset = "\033[0m"
 
             print(f"\n{opp.company_name} ({opp.ticker}) — {opp.form_type}")
-            print(f"Period: {opp.filed_at[:10]}  |  Researched: {opp.researched_at[:10]}")
+            print(f"Period: {opp.period_of_report or opp.filed_at[:10]}  |  Researched: {opp.researched_at[:10]}")
             print(
                 f"Recommendation: {rec_color}{opp.recommendation.upper()}{reset} "
                 f"(confidence: {opp.confidence:.0%})"

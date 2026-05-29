@@ -110,6 +110,7 @@ class ResearchOpportunity(BaseModel):
     company_name: str
     form_type: str
     filed_at: str                   # ISO string for JSON serialisation
+    period_of_report: str = ""    
     recommendation: str
     confidence: float
     rationale: str
