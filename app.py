@@ -94,24 +94,25 @@ def format_memory(memory: list[ResearchOpportunity]) -> str:
 # Tab 1 — Research Chat
 
 
-def chat(user_message: str, ticker_filter: str, history: list[dict]):
-    """Handle a chat turn and return answer + sources."""
+def chat(user_message: str, ticker_filter: str, history: list):
     if not user_message.strip():
         return history, "*Ask a question to see sources.*"
 
     llm_history = []
-    for user_msg, assistant_msg in (history or []):
-        if user_msg:
-            llm_history.append({"role": "user", "content": user_msg})
-        if assistant_msg:
-            llm_history.append({"role": "assistant", "content": assistant_msg})
+    for m in (history or []):
+        if isinstance(m, dict):
+            llm_history.append({"role": m["role"], "content": m["content"]})
+        elif isinstance(m, (list, tuple)) and len(m) == 2:
+            if m[0]:
+                llm_history.append({"role": "user", "content": m[0]})
+            if m[1]:
+                llm_history.append({"role": "assistant", "content": m[1]})
 
     ticker = ticker_filter.strip().upper() or None
     answer, chunks = answer_question(user_message, llm_history, ticker=ticker)
     sources_md = format_sources(chunks)
 
-    history = (history or []) + [(user_message, answer)]
-
+    history = (history or []) + [{"role": "user", "content": user_message}, {"role": "assistant", "content": answer}]
     return history, sources_md
 
 
