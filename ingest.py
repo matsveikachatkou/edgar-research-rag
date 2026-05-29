@@ -18,6 +18,7 @@ import os
 import sys
 import re
 import warnings
+import time
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -44,7 +45,7 @@ COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
 AVERAGE_CHUNK_SIZE = 500
 WORKERS = 3
-WAIT = wait_exponential(multiplier=1, min=10, max=240)
+WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
 
 logging.basicConfig(
@@ -163,23 +164,52 @@ def resolve_pdf_url(ticker: str, form_type: str) -> str | None:
         return None
 
 
+# CIK resolution
+
+
+_CIK_CACHE: dict[str, str] = {}
+
+
+def resolve_cik(ticker: str) -> str | None:
+    """
+    Resolve a ticker symbol to SEC CIK using the SEC's public mapping file.
+    Results are cached in memory for the session.
+    """
+    ticker = ticker.upper()
+    if ticker in _CIK_CACHE:
+        return _CIK_CACHE[ticker]
+
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        for entry in data.values():
+            if entry.get("ticker", "").upper() == ticker:
+                cik = str(entry["cik_str"]).zfill(10)
+                _CIK_CACHE[ticker] = cik
+                log.info(f"Resolved {ticker} → CIK {cik} ({entry.get('title', '')})")
+                return cik
+
+        log.warning(f"Ticker {ticker} not found in SEC mapping")
+        return None
+
+    except Exception as e:
+        log.error(f"CIK resolution failed for {ticker}: {e}")
+        return None
+
+
 def fetch_filings_v2(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
     """
     Fetch recent filings using the EDGAR submissions API.
-    More reliable than full-text search — returns primary document directly.
+    Resolves ticker to CIK dynamically via SEC's public mapping.
     """
     from datetime import datetime
 
-    TICKER_TO_CIK = {
-        "AAPL": "0000320193", "MSFT": "0000789019", "NVDA": "0001045810",
-        "GOOGL": "0001652044", "AMZN": "0001018724", "META": "0001326801",
-        "TSLA": "0001318605", "JPM": "0000019617", "GS": "0000886982",
-        "NFLX": "0001065280", "AMD": "0000002488", "INTC": "0000050863",
-    }
-
-    cik = TICKER_TO_CIK.get(ticker.upper())
+    cik = resolve_cik(ticker.upper())
     if not cik:
-        log.warning(f"No CIK mapping for {ticker} — add it to TICKER_TO_CIK")
+        log.warning(f"Could not resolve CIK for {ticker} — skipping")
         return []
 
     log.info(f"Fetching {form_type} for {ticker} via submissions API (CIK: {cik})")
@@ -369,15 +399,36 @@ def _make_messages(filing: EdgarFiling) -> list[dict]:
     return [{"role": "user", "content": _make_chunk_prompt(filing)}]
 
 
-@retry(wait=WAIT)
-def process_filing(filing: EdgarFiling) -> list[Result]:
-    """Chunk a single filing via LLM and return Results."""
-    if not filing.document_markdown:
-        log.warning(f"No markdown content for {filing.ticker} — skipping chunking")
-        return []
+BATCH_SIZE = 8000  # chars per batch, safe for gpt-4.1-mini context
+BATCH_OVERLAP = 500  # overlap between batches to avoid cutting mid-sentence
 
-    log.info(f"Chunking {filing.ticker} {filing.form_type}")
-    messages = _make_messages(filing)
+
+def split_into_batches(text: str, batch_size: int = BATCH_SIZE, overlap: int = BATCH_OVERLAP) -> list[str]:
+    """Split a long document into overlapping batches for LLM chunking."""
+    if len(text) <= batch_size:
+        return [text]
+
+    batches = []
+    start = 0
+    while start < len(text):
+        end = start + batch_size
+        if end < len(text):
+            boundary = text.rfind("\n\n", start, end)
+            if boundary > start + batch_size // 2:
+                end = boundary
+        batches.append(text[start:end])
+        start = end - overlap
+
+    log.info(f"Split into {len(batches)} batches ({len(text):,} total chars)")
+    return batches
+
+
+@retry(wait=WAIT)
+def process_batch(batch_text: str, filing: EdgarFiling, batch_num: int) -> list[Result]:
+    """Chunk a single batch of filing text via LLM."""
+    batch_filing = filing.model_copy()
+    batch_filing.document_markdown = batch_text
+    messages = _make_messages(batch_filing)
     response = completion(
         model=MODEL,
         messages=messages,
@@ -386,8 +437,31 @@ def process_filing(filing: EdgarFiling) -> list[Result]:
     reply = response.choices[0].message.content
     doc_chunks = Chunks.model_validate_json(reply).chunks
     results = [chunk.as_result(filing) for chunk in doc_chunks]
-    log.info(f"Created {len(results)} chunks for {filing.ticker}")
+    log.info(f"Batch {batch_num}: {len(results)} chunks")
     return results
+
+
+def process_filing(filing: EdgarFiling) -> list[Result]:
+    """Chunk a filing via LLM using batched processing."""
+    if not filing.document_markdown:
+        log.warning(f"No content for {filing.ticker} — skipping")
+        return []
+
+    log.info(f"Chunking {filing.ticker} {filing.form_type} ({len(filing.document_markdown):,} chars)")
+    batches = split_into_batches(filing.document_markdown)
+    all_results: list[Result] = []
+
+    for i, batch in enumerate(batches, 1):
+        try:
+            results = process_batch(batch, filing, batch_num=i)
+            all_results.extend(results)
+            time.sleep(3)
+        except Exception as e:
+            log.error(f"Batch {i} failed for {filing.ticker}: {e}")
+            continue
+
+    log.info(f"Total chunks for {filing.ticker}: {len(all_results)}")
+    return all_results
 
 
 def create_chunks(filings: list[EdgarFiling]) -> list[Result]:
@@ -461,7 +535,7 @@ def ingest(
     tickers: list[str],
     form_type: str = "10-Q",
     k: int = 1,
-    max_chars: int | None = 50000,
+    max_chars: int | None = None,
 ) -> None:
     """
     Full ingestion pipeline for a list of tickers.
@@ -470,7 +544,7 @@ def ingest(
         tickers:    List of ticker symbols e.g. ["AAPL", "MSFT"]
         form_type:  SEC form type e.g. "10-K", "10-Q"
         k:          Number of filings per ticker to ingest
-        max_chars:  Cap extracted characters per filing (default: 50000)
+        max_chars:  Cap extracted characters per filing (default: None)
     """
     chroma = PersistentClient(path=DB_NAME)
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
@@ -519,8 +593,8 @@ if __name__ == "__main__":
         help="Number of filings per ticker (default: 1)"
     )
     parser.add_argument(
-        "--max-chars", type=int, default=50000,
-        help="Cap extracted characters per filing (default: 50000)"
+        "--max-chars", type=int, default=None,
+        help="Cap extracted characters per filing (default: no limit)"
     )
     args = parser.parse_args()
     ingest(

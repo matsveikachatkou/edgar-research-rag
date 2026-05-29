@@ -94,7 +94,7 @@ class ResearchFramework:
         self,
         tickers: list[str] | None = None,
         form_types: list[str] | None = None,
-        max_chars: int | None = 15000,
+        max_chars: int | None = None,
     ):
         self.tickers = tickers
         self.form_types = form_types or ["10-Q"]
@@ -281,8 +281,8 @@ if __name__ == "__main__":
         help="SEC form type: 10-K or 10-Q (default: 10-Q)"
     )
     parser.add_argument(
-        "--max-chars", type=int, default=15000,
-        help="Cap extracted characters per filing (default: 15000)"
+        "--max-chars", type=int, default=None,
+        help="Cap extracted characters per filing (default: None)"
     )
     parser.add_argument(
         "--max-events", type=int, default=3,
