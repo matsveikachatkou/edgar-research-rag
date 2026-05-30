@@ -316,13 +316,7 @@ def run_eval(ticker_input: str, custom_questions: str):
 # Build UI
 
 
-with gr.Blocks(
-    title="EDGAR Research RAG",
-    css="""
-        * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important; }
-        .gradio-container { max-width: 1400px !important; }
-        """
-) as app:
+with gr.Blocks(title="EDGAR Research RAG") as app:
     gr.Markdown("#EDGAR Research RAG")
     gr.Markdown(
         "RAG-powered investment research over SEC filings. "
@@ -515,4 +509,11 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    app.launch(inbrowser=True, theme=gr.themes.Soft())
+    app.launch(
+    inbrowser=True,
+    theme=gr.themes.Soft(),
+    css="""
+        * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important; }
+        .gradio-container { max-width: 1400px !important; }
+    """
+)
