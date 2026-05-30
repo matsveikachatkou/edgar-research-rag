@@ -186,4 +186,3 @@ Context precision improved from 0.10 (11 chunks, 15k chars) to 0.53 (79 chunks, 
 ## Related projects
 
 - [`equity-lens`](https://github.com/matsveikachatkou/equity-lens) — 6-agent CrewAI investment research pipeline
-- [`agentic_ai_course`](https://github.com/matsveikachatkou/agentic_ai_course) — AI agents course covering CrewAI, LangChain, LangGraph, AutoGen, MCP
