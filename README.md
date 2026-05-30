@@ -75,10 +75,11 @@ uv sync
 > ```
 > Then run `uv sync` again.
 
-Create a `.env` file:
+Copy `.env.example` to `.env` and add your OpenAI API key:
+```bash
+cp .env.example .env
 ```
-OPENAI_API_KEY=sk-...
-```
+Then edit `.env` and fill in your `OPENAI_API_KEY`.
 
 > OpenAI is the only required API. SEC EDGAR is public and requires no authentication.
 
