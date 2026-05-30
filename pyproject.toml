@@ -1,11 +1,10 @@
 [project]
 name = "edgar-research-rag"
 version = "0.1.0"
-description = "Add your description here"
+description = "RAG-powered investment research over SEC filings"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "arxiv>=4.0.0",
     "beautifulsoup4>=4.14.3",
     "chromadb>=1.5.9",
     "gradio>=6.15.2",
