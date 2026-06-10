@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
-
+from typing import Literal
+from datetime import datetime, timezone
 
 # Ingestion models
 
@@ -55,7 +56,7 @@ class Chunks(BaseModel):
 class Result(BaseModel):
     """A retrieved chunk with its metadata."""
     page_content: str
-    metadata: dict
+    metadata: dict[str, str | float]
 
 
 class RankOrder(BaseModel):
@@ -80,9 +81,7 @@ class SecuritiesEvent(BaseModel):
 class Recommendation(BaseModel):
     """Structured output from the recommendation agent."""
     ticker: str
-    recommendation: str = Field(
-        description="One of: buy, hold, sell"
-    )
+    recommendation: Literal["overweight", "neutral", "underweight"]
     confidence: float = Field(
         description="Confidence score between 0 and 1",
         ge=0.0,
@@ -116,7 +115,7 @@ class ResearchOpportunity(BaseModel):
     rag_summary: str                # raw research agent output
     filing_url: str
     researched_at: str = Field(
-        default_factory=lambda: datetime.utcnow().isoformat()
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
 
 
