@@ -28,7 +28,7 @@ from research_framework import MEMORY_PATH, ResearchFramework
 # Helpers
 
 
-REC_COLORS = {"buy": "🟢", "hold": "🟡", "sell": "🔴"}
+REC_COLORS = {"overweight": "🟢", "neutral": "🟡", "underweight": "🔴"}
 
 
 def format_sources(chunks) -> str:
@@ -174,10 +174,10 @@ def generate_recommendation(ticker: str, period: str) -> str:
         rec = recommender.recommend(ticker=ticker, summary=summary, chunks=chunks)
 
         rec_label = {
-                    "buy": '<span style="color: #22c55e; font-weight: bold;">BUY</span>',
-                    "hold": '<span style="color: #eab308; font-weight: bold;">HOLD</span>',
-                    "sell": '<span style="color: #ef4444; font-weight: bold;">SELL</span>',
-                }.get(rec.recommendation, rec.recommendation.upper())
+                  "overweight": '<span style="color: #22c55e; font-weight: bold;">OVERWEIGHT</span>',
+                  "neutral": '<span style="color: #eab308; font-weight: bold;">NEUTRAL</span>',
+                  "underweight": '<span style="color: #ef4444; font-weight: bold;">UNDERWEIGHT</span>',
+              }.get(rec.recommendation, rec.recommendation.upper())
         return f"""## {ticker} — {period}
 
 **Recommendation:** {rec_label} ({rec.confidence:.0%} confidence)
@@ -399,8 +399,8 @@ with gr.Blocks(title="EDGAR Research RAG") as app:
             send_to_chat_btn = gr.Button("Send to chat", variant="secondary")
 
             def update_periods(ticker):
-                periods = get_periods_for_ticker(ticker)
-                return gr.Dropdown(choices=periods, value=periods[0] if periods else None)
+              periods = get_periods_for_ticker(ticker)
+              return gr.update(choices=periods, value=periods[0] if periods else None)
 
             rec_ticker.change(
                 update_periods,
@@ -408,7 +408,7 @@ with gr.Blocks(title="EDGAR Research RAG") as app:
                 outputs=[rec_period],
             )
             refresh_btn.click(
-                fn=lambda: gr.Dropdown(choices=get_available_tickers()),
+                fn=lambda: gr.update(choices=get_available_tickers()),
                 outputs=[rec_ticker],
             )
             rec_btn.click(
