@@ -56,13 +56,13 @@ class RecommendAgent(Agent):
         chunk_context = ""
         if chunks:
             snippet_parts = []
-            for chunk in chunks[:5]:
+            for chunk in chunks:
                 company = chunk.metadata.get("company_name", ticker)
                 form = chunk.metadata.get("form_type", "")
                 period = chunk.metadata.get("period_of_report", "")
                 snippet_parts.append(
                     f"[{company} {form} {period}]: "
-                    f"{chunk.page_content[:300]}"
+                    f"{chunk.page_content}"
                 )
             chunk_context = (
                 "\n\nSupporting filing excerpts:\n\n"
@@ -78,7 +78,7 @@ Research summary:
 {chunk_context}
 
 Generate a recommendation with:
-- recommendation: exactly one of "buy", "hold", or "sell"
+- recommendation: exactly one of "overweight", "neutral", or "underweight"
 - confidence: float between 0 and 1 reflecting certainty
 - rationale: 2-3 sentences grounded in specific filing evidence
 - key_risks: up to 3 specific risks from the filing (not generic)
