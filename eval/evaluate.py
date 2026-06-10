@@ -25,6 +25,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from litellm import completion
 from tenacity import retry, wait_exponential
+from pydantic import BaseModel, Field
 
 load_dotenv(override=True)
 
@@ -44,6 +45,19 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Eval LLM Output Models
+
+class ContextPrecisionScore(BaseModel):
+    scores: list[int] = Field(description="List of 1s (relevant) and 0s (not relevant)")
+
+class FaithfulnessScore(BaseModel):
+    total_claims: int
+    supported_claims: int
+    faithfulness: float = Field(description="Score between 0.0 and 1.0")
+
+class RelevanceScore(BaseModel):
+    relevance: float = Field(description="Score between 0.0 and 1.0")
+    reason: str
 
 # Default evaluation questions per domain
 
@@ -64,15 +78,12 @@ DEFAULT_QUESTIONS = [
 
 @retry(wait=WAIT)
 def score_context_precision(question: str, chunks: list[Result]) -> float:
-    """
-    Score how relevant the retrieved chunks are to the question.
-    Returns 0-1: fraction of chunks judged relevant by the LLM.
-    """
     if not chunks:
         return 0.0
 
+    # FIX: Removed the [:400] slice to give the LLM the full context
     chunk_list = "\n\n".join(
-        f"CHUNK {i+1}:\n{c.page_content[:400]}"
+        f"CHUNK {i+1}:\n{c.page_content}"
         for i, c in enumerate(chunks)
     )
 
@@ -84,23 +95,21 @@ Retrieved chunks:
 {chunk_list}
 
 For each chunk, judge whether it contains information relevant to answering 
-the question. Reply with a JSON object in exactly this format:
-{{"scores": [1, 0, 1, 1, 0, 1, 0, 1, 0, 1]}}
-
-Use 1 for relevant, 0 for not relevant. Include one score per chunk in order."""
+the question. Use 1 for relevant, 0 for not relevant. Include one score per chunk in order."""
 
     try:
         response = completion(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=ContextPrecisionScore, # Use Pydantic
         )
-        data = json.loads(response.choices[0].message.content)
-        scores = data.get("scores", [])
-        if not scores:
+        reply = response.choices[0].message.content
+        data = ContextPrecisionScore.model_validate_json(reply)
+        
+        if not data.scores:
             return 0.0
-        # Trim or pad to match chunk count
-        scores = scores[:len(chunks)]
+            
+        scores = data.scores[:len(chunks)]
         return round(sum(scores) / len(chunks), 3)
     except Exception as e:
         log.warning(f"Context precision scoring failed: {e}")
@@ -114,14 +123,11 @@ Use 1 for relevant, 0 for not relevant. Include one score per chunk in order."""
 def score_answer_faithfulness(
     answer: str, chunks: list[Result]
 ) -> float:
-    """
-    Score whether the answer is grounded in the retrieved context.
-    Returns 0-1: fraction of answer claims supported by the context.
-    """
     if not chunks or not answer:
         return 0.0
 
-    context = "\n\n".join(c.page_content[:400] for c in chunks[:5])
+    # FIX: Evaluate against all chunks, fully un-truncated
+    context = "\n\n".join(c.page_content for c in chunks)
 
     prompt = f"""You are evaluating whether an AI answer is faithful to its source context.
 
@@ -132,21 +138,18 @@ Answer to evaluate:
 {answer}
 
 Break the answer into individual factual claims. For each claim, judge whether 
-it is directly supported by the context above.
-
-Reply with a JSON object in exactly this format:
-{{"total_claims": 5, "supported_claims": 4, "faithfulness": 0.8}}
-
-Be strict: a claim is only supported if the context explicitly contains that information."""
+it is directly supported by the context above. Be strict: a claim is only supported 
+if the context explicitly contains that information."""
 
     try:
         response = completion(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=FaithfulnessScore, # Use Pydantic
         )
-        data = json.loads(response.choices[0].message.content)
-        return round(float(data.get("faithfulness", 0.0)), 3)
+        reply = response.choices[0].message.content
+        data = FaithfulnessScore.model_validate_json(reply)
+        return round(data.faithfulness, 3)
     except Exception as e:
         log.warning(f"Faithfulness scoring failed: {e}")
         return 0.0
@@ -157,10 +160,6 @@ Be strict: a claim is only supported if the context explicitly contains that inf
 
 @retry(wait=WAIT)
 def score_answer_relevance(question: str, answer: str) -> float:
-    """
-    Score whether the answer actually addresses the question asked.
-    Returns 0-1.
-    """
     if not answer:
         return 0.0
 
@@ -175,19 +174,17 @@ Score how well the answer addresses the question on a scale of 0 to 1:
 - 0.7: mostly answers the question with minor gaps
 - 0.4: partially answers the question
 - 0.1: tangentially related but doesn't answer the question
-- 0.0: does not address the question at all
-
-Reply with a JSON object in exactly this format:
-{{"relevance": 0.8, "reason": "one sentence explanation"}}"""
+- 0.0: does not address the question at all"""
 
     try:
         response = completion(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=RelevanceScore, # Use Pydantic
         )
-        data = json.loads(response.choices[0].message.content)
-        return round(float(data.get("relevance", 0.0)), 3)
+        reply = response.choices[0].message.content
+        data = RelevanceScore.model_validate_json(reply)
+        return round(data.relevance, 3)
     except Exception as e:
         log.warning(f"Answer relevance scoring failed: {e}")
         return 0.0
