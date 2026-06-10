@@ -315,6 +315,7 @@ def split_into_batches(
     return batches
 
 
+@retry(wait=WAIT)
 async def process_batch_async(
     batch_text: str, filing: EdgarFiling, batch_num: int, semaphore: asyncio.Semaphore
 ) -> list[Result]:
@@ -384,16 +385,13 @@ def already_ingested(collection, filing: EdgarFiling) -> bool:
     return len(results["ids"]) > 0
 
 
-def store_chunks(chunks: list[Result], filing: EdgarFiling) -> None:
+def store_chunks(chunks: list[Result], filing: EdgarFiling, collection) -> None:
     """
     Embed and store chunks for a single filing.
     Uses filing_id metadata for deduplication — safe to rerun.
     """
     if not chunks:
         return
-
-    chroma = PersistentClient(path=DB_NAME)
-    collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     fid = _filing_id(filing)
 
@@ -409,7 +407,7 @@ def store_chunks(chunks: list[Result], filing: EdgarFiling) -> None:
 
     # Build unique IDs using filing_id + chunk index
     existing_count = collection.count()
-    ids = [f"{fid}_{existing_count + i}" for i in range(len(chunks))]
+    ids = [f"{fid}_chunk_{i}" for i in range(len(chunks))]
     metas = [{**c.metadata, "filing_id": fid} for c in chunks]
 
     collection.add(
@@ -467,7 +465,7 @@ def ingest(
         # Chunk and store
         for filing in new_filings:
             chunks = process_filing(filing)
-            store_chunks(chunks, filing)
+            store_chunks(chunks, filing, collection)
 
     log.info("Ingestion complete")
     final = chroma.get_or_create_collection(COLLECTION_NAME)
