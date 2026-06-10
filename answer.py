@@ -11,6 +11,7 @@ Retrieval pipeline:
 
 import os
 from pathlib import Path
+import logging
 
 from chromadb import PersistentClient
 from dotenv import load_dotenv
@@ -24,6 +25,9 @@ load_dotenv(override=True)
 
 # Config
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
 MODEL = "openai/gpt-4.1-mini"
 DB_NAME = str(Path(__file__).parent / "edgar_db")
 COLLECTION_NAME = "edgar_filings"
@@ -34,8 +38,6 @@ RETRIEVAL_K = 15
 FINAL_K = 8
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-chroma = PersistentClient(path=DB_NAME)
-collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
 SYSTEM_PROMPT = """You are a financial research assistant that answers questions \
 about SEC filings (10-K, 10-Q) for public companies.
@@ -102,6 +104,7 @@ def embed_query(text: str) -> list[float]:
 
 def fetch_chunks(
     query: str,
+    collection,
     ticker: str | None = None,
     period: str | None = None,
     k: int = RETRIEVAL_K,
@@ -129,11 +132,9 @@ def fetch_chunks(
             n_results=min(k, collection.count() or 1),
             where=where,
         )
-    except Exception:
-        results = collection.query(
-            query_embeddings=[query_vec],
-            n_results=min(k, collection.count() or 1),
-        )
+    except Exception as e:
+        log.error(f"Chroma filtering query failed for ticker {ticker}: {e}")
+        return []
 
     chunks = []
     for doc, meta in zip(
@@ -178,7 +179,7 @@ def rerank(question: str, chunks: list[Result]) -> list[Result]:
         form = chunk.metadata.get("form_type", "")
         user_prompt += (
             f"# CHUNK ID: {idx + 1} [{ticker} {form}]:\n\n"
-            f"{chunk.page_content[:300]}\n\n"
+            f"{chunk.page_content}\n\n"
         )
     user_prompt += "Reply only with the list of ranked chunk ids."
 
@@ -221,7 +222,7 @@ def make_rag_messages(
     system = SYSTEM_PROMPT.format(context=context)
     return (
         [{"role": "system", "content": system}]
-        + history
+        + history[-4:]
         + [{"role": "user", "content": question}]
     )
 
@@ -231,6 +232,7 @@ def make_rag_messages(
 
 def fetch_context(
     question: str,
+    collection,
     ticker: str | None = None,
     period: str | None = None,
     final_k: int = FINAL_K,
@@ -262,8 +264,11 @@ def answer_question(
     Returns:
         (answer_text, retrieved_chunks)
     """
+    chroma = PersistentClient(path=DB_NAME)
+    collection = chroma.get_or_create_collection(COLLECTION_NAME)
+
     history = history or []
-    chunks = fetch_context(question, ticker=ticker, period=period)
+    chunks = fetch_context(question, collection, ticker=ticker, period=period)
 
     if not chunks:
         return (
