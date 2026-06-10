@@ -166,7 +166,7 @@ class ResearchFramework:
             rationale=rec.rationale,
             key_risks=rec.key_risks,
             key_opportunities=rec.key_opportunities,
-            rag_summary=summary[:1000],
+            rag_summary=summary,
             filing_url=event.filing_url,
         )
 
@@ -238,10 +238,10 @@ class ResearchFramework:
         print("=" * 60)
         for opp in sorted(self.memory, key=lambda x: x.researched_at, reverse=True):
             rec_color = {
-                "buy": "\033[92m",
-                "hold": "\033[93m",
-                "sell": "\033[91m",
-            }.get(opp.recommendation, "")
+              "overweight": "\033[92m",
+              "neutral": "\033[93m",
+              "underweight": "\033[91m",
+          }.get(opp.recommendation, "")
             reset = "\033[0m"
 
             print(f"\n{opp.company_name} ({opp.ticker}) — {opp.form_type}")
