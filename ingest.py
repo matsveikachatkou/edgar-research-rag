@@ -96,6 +96,33 @@ def resolve_cik(ticker: str) -> str | None:
         return None
 
 
+def _find_exhibit_99(cik_short: str, acc_clean: str, accession: str) -> str | None:
+    """
+    Scan the 8-K filing index for Exhibit 99.1 (earnings press release).
+    Returns the full URL of the exhibit or None if not found.
+    """
+    index_url = (
+        f"https://www.sec.gov/Archives/edgar/data/"
+        f"{cik_short}/{acc_clean}/"
+    )
+    try:
+        resp = requests.get(index_url, headers=SEC_HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.content, "lxml")
+        for a in soup.find_all("a"):
+            href = a.get("href", "").lower()
+            filename = href.split("/")[-1]
+            if ("ex99" in filename or "ex-99" in filename) and filename.endswith(".htm"):
+                full_url = f"https://www.sec.gov{a.get('href')}"
+                log.info(f"Found Exhibit 99.1: {full_url}")
+                return full_url
+        log.warning(f"No Exhibit 99.1 found in {index_url}")
+        return None
+    except Exception as e:
+        log.error(f"Exhibit discovery failed for {accession}: {e}")
+        return None
+
+
 def fetch_filings(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[EdgarFiling]:
     """
     Fetch recent filings using the EDGAR submissions API.
@@ -137,10 +164,22 @@ def fetch_filings(ticker: str, form_type: str = "10-Q", k: int = 1) -> list[Edga
         acc_clean = accession.replace("-", "")
         primary_doc = primary_docs[i]
 
-        doc_url = (
-            f"https://www.sec.gov/Archives/edgar/data/"
-            f"{cik_short}/{acc_clean}/{primary_doc}"
-        )
+        # For 8-K: fetch Exhibit 99.1 (press release) instead of cover page
+        if form_type == "8-K":
+            items_list = filings_data.get("items", [])
+            item_str = items_list[i] if i < len(items_list) else ""
+            if "2.02" not in item_str:
+                log.info(f"Skipping 8-K for {ticker} — not earnings release (items: {item_str})")
+                continue
+            doc_url = _find_exhibit_99(cik_short, acc_clean, accession) or ""
+            if not doc_url:
+                log.warning(f"No press release found for {ticker} 8-K {dates[i]} — skipping")
+                continue
+        else:
+            doc_url = (
+                f"https://www.sec.gov/Archives/edgar/data/"
+                f"{cik_short}/{acc_clean}/{primary_doc}"
+            )
         filing_url = (
             f"https://www.sec.gov/Archives/edgar/data/"
             f"{cik_short}/{acc_clean}/{accession}-index.htm"

@@ -72,11 +72,20 @@ class ScannerAgent(Agent):
         dates = filings_data.get("filingDate", [])
         accessions = filings_data.get("accessionNumber", [])
         periods = filings_data.get("reportDate", [])
+        items = filings_data.get("items", [])  
 
         events = []
         for i, form in enumerate(forms):
             if form != form_type:
                 continue
+
+            # For 8-K: only process earnings releases (item 2.02)
+            if form_type == "8-K":
+                item_str = items[i] if i < len(items) else ""
+                if "2.02" not in item_str:
+                    self.log(f"Skipping 8-K for {ticker} — not an earnings release (items: {item_str})")
+                    continue
+
             if len(events) >= k:
                 break
 
