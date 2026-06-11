@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import logging
 from datetime import datetime
+import re
 
 from chromadb import PersistentClient
 from dotenv import load_dotenv
@@ -164,6 +165,94 @@ def merge_chunks(a: list[Result], b: list[Result]) -> list[Result]:
     return merged
 
 
+def merge_chunks_balanced(
+    a: list[Result],
+    b: list[Result],
+    tickers: list[str],
+    k_per_ticker: int = 8,
+) -> list[Result]:
+    seen = set()
+    per_ticker: dict[str, list[Result]] = {t: [] for t in tickers}
+
+    for chunk in list(a) + list(b):
+        if chunk.page_content in seen:
+            continue
+        seen.add(chunk.page_content)
+        ticker = chunk.metadata.get("ticker", "")
+        if ticker in per_ticker and len(per_ticker[ticker]) < k_per_ticker:
+            per_ticker[ticker].append(chunk)
+        # Drop overflow entirely — non-target tickers are noise
+
+    merged = []
+    for t in tickers:
+        merged.extend(per_ticker[t])
+    return merged
+
+
+def detect_tickers_in_query(question: str, collection) -> list[str]:
+    """
+    Detect which ingested tickers are mentioned in the query.
+    Uses regex word boundaries to avoid substring matching traps (e.g., 'A', 'IT').
+    Uses targeted metadata-only fetching to prevent OOM memory spikes.
+    """
+    try:
+        # Prevent Memory Bomb: Only fetch metadata, never documents/embeddings here
+        results = collection.get(include=["metadatas"])
+        available = set(
+            m.get("ticker", "") 
+            for m in results["metadatas"] 
+            if m.get("ticker")
+        )
+    except Exception as e:
+        log.error(f"Failed to fetch available tickers: {e}")
+        return []
+
+    question_upper = question.upper()
+    matched = []
+    
+    for t in available:
+        # Prevent Substring Trap: Match whole words only
+        if re.search(rf'\b{t}\b', question_upper):
+            matched.append(t)
+            
+    return matched
+
+
+def fetch_chunks_parallel(
+    question: str,
+    collection,
+    tickers: list[str],
+    k_per_ticker: int = 8,
+) -> list[Result]:
+    """
+    Isolated per-ticker retrieval for cross-company queries.
+    Fetches exactly k chunks per ticker using metadata filtering,
+    guaranteeing balanced representation regardless of corpus size.
+    """
+    query_vec = embed_query(question)
+    all_chunks: list[Result] = []
+    seen = set()
+
+    for ticker in tickers:
+        try:
+            results = collection.query(
+                query_embeddings=[query_vec],
+                n_results=min(k_per_ticker, collection.count() or 1),
+                where={"ticker": {"$eq": ticker}},
+            )
+            for doc, meta in zip(
+                results["documents"][0], results["metadatas"][0]
+            ):
+                if doc not in seen:
+                    all_chunks.append(Result(page_content=doc, metadata=meta))
+                    seen.add(doc)
+            log.info(f"Parallel fetch: {ticker} → {len(results['documents'][0])} chunks")
+        except Exception as e:
+            log.error(f"Parallel fetch failed for {ticker}: {e}")
+
+    return all_chunks
+
+
 # Reranking
 
 
@@ -306,16 +395,39 @@ def fetch_context(
     form_type: str | None = None,
     final_k: int = FINAL_K,
 ) -> tuple[list[Result], str | None, str | None]:
-    k = RETRIEVAL_K if ticker else RETRIEVAL_K_BROAD
-    effective_final_k = final_k if ticker else FINAL_K_BROAD
 
-    rewritten = rewrite_query(question)
-    chunks_original = fetch_chunks(question, collection, ticker=ticker, period=period, k=k)
-    chunks_rewritten = fetch_chunks(rewritten, collection, ticker=ticker, period=period, k=k)
-    merged = merge_chunks(chunks_original, chunks_rewritten)
+    # Detect cross-company query
+    if not ticker:
+        detected = detect_tickers_in_query(question, collection)
+    else:
+        detected = []
+
+    if len(detected) >= 2:
+        log.info(f"Cross-company query detected: {detected} — using parallel retrieval")
+        rewritten = rewrite_query(question)
+        chunks_original = fetch_chunks_parallel(question, collection, detected)
+        chunks_rewritten = fetch_chunks_parallel(rewritten, collection, detected)
+        merged = merge_chunks_balanced(chunks_original, chunks_rewritten, detected, k_per_ticker=8)
+        effective_final_k = FINAL_K_BROAD
+    elif ticker:
+        # Single ticker — tight retrieval
+        rewritten = rewrite_query(question)
+        chunks_original = fetch_chunks(question, collection, ticker=ticker, period=period, k=RETRIEVAL_K)
+        chunks_rewritten = fetch_chunks(rewritten, collection, ticker=ticker, period=period, k=RETRIEVAL_K)
+        merged = merge_chunks(chunks_original, chunks_rewritten)
+        effective_final_k = final_k
+    else:
+        # No ticker detected — broad retrieval
+        rewritten = rewrite_query(question)
+        chunks_original = fetch_chunks(question, collection, k=RETRIEVAL_K_BROAD)
+        chunks_rewritten = fetch_chunks(rewritten, collection, k=RETRIEVAL_K_BROAD)
+        merged = merge_chunks(chunks_original, chunks_rewritten)
+        effective_final_k = FINAL_K_BROAD
+
     reranked = rerank(question, merged)
     final_chunks = reranked[:effective_final_k]
 
+    # XBRL only for single-ticker queries
     xbrl_context = None
     temporal_warning = None
     if ticker:
