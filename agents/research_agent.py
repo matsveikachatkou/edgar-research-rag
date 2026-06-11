@@ -37,6 +37,7 @@ class ResearchAgent(Agent):
         focus: str = "investment outlook",
         history: list[dict] | None = None,
         period: str | None = None,
+        form_type: str | None = None,
     ) -> tuple[str, list[Result]]:
         """
         Produce a research summary for a ticker using RAG.
@@ -65,6 +66,7 @@ class ResearchAgent(Agent):
             history=history or [],
             ticker=ticker,
             period=period,
+            form_type=form_type,
         )
 
         if not chunks:

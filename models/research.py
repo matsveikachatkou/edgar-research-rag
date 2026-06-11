@@ -143,3 +143,28 @@ class EvalResult(BaseModel):
             (self.context_precision + self.answer_faithfulness + self.answer_relevance) / 3,
             3,
         )
+    
+
+    # XBRL models
+
+
+# XBRL models
+
+class FinancialMetric(BaseModel):
+    label: str
+    xbrl_tag: str
+    value: float
+    unit: str
+    period_end: str
+    form_type: str
+    period_type: str  # "instant" or "duration"
+
+
+class FinancialSnapshot(BaseModel):
+    ticker: str
+    company_name: str
+    cik: str
+    period_end: str
+    form_type: str
+    metrics: list[FinancialMetric]
+    fetched_at: str

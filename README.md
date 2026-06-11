@@ -16,6 +16,8 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 
 **Eval Dashboard** — Measure retrieval quality across three metrics: context precision, answer faithfulness, and answer relevance. LLM-judged, RAGAS-inspired, no external dependencies.
 
+**Structured + unstructured fusion** — Quantitative questions (revenue, margins, EPS, cash) are answered using exact XBRL figures pulled directly from the SEC EDGAR Frames API, eliminating hallucination risk on financial metrics. Narrative context (management commentary, risk factors, segment performance) comes from the RAG pipeline. Both sources are fused in a single answer with full citations.
+
 ---
 
 ## Architecture
@@ -28,9 +30,16 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
+│  Structured data layer                               │
+│  SEC XBRL Frames API → taxonomy fallback resolver    │
+│  → FinancialSnapshot (8 metrics) → disk cache        │
+└────────────────────┬────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────┐
 │  Retrieval layer                                     │
 │  Query rewrite → dual retrieval → merge → LLM rerank │
-│  Optional ticker + period filters                    │
+│  XBRL context prepended when ticker identified       │
+│  Adaptive k: ticker-filtered (8) vs broad (15)       │
 └────────────────────┬────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────┐
@@ -54,6 +63,8 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 - **LLM reranker** — Retrieved chunks are reranked by relevance before being passed to the answer model. Improves precision over pure embedding similarity.
 - **Pydantic structured output** — All agent outputs (`Recommendation`, `Chunks`, `RankOrder`) are validated Pydantic models. No string parsing, no pipe-splitting.
 - **Dynamic CIK resolution** — Any US-listed ticker resolves to a CIK via SEC's public mapping file. No hardcoded lookup tables.
+- **XBRL structured data fusion** — The SEC EDGAR Frames API exposes every reported financial fact as structured XBRL data. Rather than relying on RAG to extract figures from flattened HTML tables (which loses row/column relationships), key metrics (revenue, operating income, net income, EPS, cash, total assets, operating cash flow, gross profit) are fetched directly via a taxonomy fallback resolver that handles tag variations across filers. Snapshots are cached to disk to avoid redundant API calls. Results are prepended to the LLM context when a ticker is identified, giving the model ground-truth numbers alongside filing narrative.
+- **Adaptive retrieval** — Retrieval pool size scales with query scope: ticker-filtered queries use k=8 for cost efficiency; unfiltered cross-company queries use k=15 to ensure balanced company representation in results.
 
 ---
 
@@ -174,6 +185,8 @@ Context precision improved from 0.10 (11 chunks, 15k chars) to 0.53 (79 chunks, 
 - SEC EDGAR only — covers US-listed companies. European filings (ESMA/ESEF) require a different data source; the architecture is source-agnostic so the scanner and ingestion layer can be swapped.
 - LLM-judged evaluation — confidence scores and eval metrics are model-generated, not backtested against ground truth. A golden dataset of question/answer pairs from filings would make evaluation more rigorous.
 - Aggregation questions — RAG retrieves by semantic similarity, not by structured data. Questions like "which company has the highest margin?" work by chance, not by design. A structured extraction layer on top would handle this reliably.
+- XBRL coverage — the structured data layer covers 8 core metrics via US-GAAP taxonomy. Companies using non-standard tags beyond the fallback list will return partial snapshots; the RAG layer still functions normally as fallback. European filers (IFRS taxonomy) are not covered.
+- Cross-company retrieval — unfiltered queries rank by embedding similarity, which can favour one company over another. Per-ticker retrieval with guaranteed minimum chunks per mentioned company is a natural next step.
 
 **Natural next steps:**
 - Scheduled ingestion — GitHub Actions or cron running `ingest.py` weekly to keep the corpus current

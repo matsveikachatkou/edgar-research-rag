@@ -20,6 +20,7 @@ from openai import OpenAI
 from tenacity import retry, wait_exponential
 
 from models.research import RankOrder, Result
+from xbrl import get_financial_snapshot, format_snapshot_for_context
 
 load_dotenv(override=True)
 
@@ -34,8 +35,10 @@ COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
 WAIT = wait_exponential(multiplier=1, min=2, max=240)
 
-RETRIEVAL_K = 15
-FINAL_K = 8
+RETRIEVAL_K = 8        # single-ticker queries
+RETRIEVAL_K_BROAD = 15 # unfiltered cross-company queries
+FINAL_K = 5
+FINAL_K_BROAD = 8
 
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -43,16 +46,16 @@ SYSTEM_PROMPT = """You are a financial research assistant that answers questions
 about SEC filings (10-K, 10-Q) for public companies.
 
 Your answers must be:
-- Grounded in the provided filing excerpts
-- Technically precise and factual
+- Grounded in the provided filing excerpts and structured financials
+- Technically precise — use the exact XBRL figures when answering quantitative questions
 - Cited by company name and filing type when referencing specific data
 - Honest about uncertainty — if the context doesn't contain enough information, say so
 
-Here are relevant excerpts from SEC filings:
+{xbrl_block}Here are relevant excerpts from SEC filings:
 
 {context}
 
-Answer the user's question based on these excerpts. \
+Answer the user's question based on these sources. \
 Always cite the company name and form type when referencing specific findings."""
 
 
@@ -208,7 +211,7 @@ def build_context(chunks: list[Result]) -> str:
         period = chunk.metadata.get("period_of_report", "")
         company = chunk.metadata.get("company_name", ticker)
         header = f"[{company} ({ticker}) — {form} {period}]"
-        parts.append(f"{header}:\n{chunk.page_content}")
+        parts.append(f"{header}:\n{chunk.page_content[:2000]}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -216,10 +219,11 @@ def make_rag_messages(
     question: str,
     history: list[dict],
     chunks: list[Result],
+    xbrl_context: str | None = None,
 ) -> list[dict]:
-    """Build the full message list for the final answer LLM call."""
     context = build_context(chunks)
-    system = SYSTEM_PROMPT.format(context=context)
+    xbrl_block = f"{xbrl_context}\n\n---\n\n" if xbrl_context else ""
+    system = SYSTEM_PROMPT.format(context=context, xbrl_block=xbrl_block)
     return (
         [{"role": "system", "content": system}]
         + history[-4:]
@@ -235,14 +239,29 @@ def fetch_context(
     collection,
     ticker: str | None = None,
     period: str | None = None,
+    form_type: str | None = None,
     final_k: int = FINAL_K,
-) -> list[Result]:
+) -> tuple[list[Result], str | None]:
+    k = RETRIEVAL_K if ticker else RETRIEVAL_K_BROAD
+    effective_final_k = final_k if ticker else FINAL_K_BROAD
+
     rewritten = rewrite_query(question)
-    chunks_original = fetch_chunks(question, ticker=ticker, period=period)
-    chunks_rewritten = fetch_chunks(rewritten, ticker=ticker, period=period)
+    chunks_original = fetch_chunks(question, collection, ticker=ticker, period=period, k=k)
+    chunks_rewritten = fetch_chunks(rewritten, collection, ticker=ticker, period=period, k=k)
     merged = merge_chunks(chunks_original, chunks_rewritten)
     reranked = rerank(question, merged)
-    return reranked[:final_k]
+
+    xbrl_context = None
+    if ticker:
+        snapshot = get_financial_snapshot(
+            ticker=ticker,
+            form_type=form_type,
+            period_end=period,
+        )
+        if snapshot:
+            xbrl_context = format_snapshot_for_context(snapshot)
+
+    return reranked[:effective_final_k], xbrl_context
 
 
 @retry(wait=WAIT)
@@ -251,24 +270,15 @@ def answer_question(
     history: list[dict] | None = None,
     ticker: str | None = None,
     period: str | None = None,
+    form_type: str | None = None,
 ) -> tuple[str, list[Result]]:
-    """
-    Answer a question using RAG over ingested SEC filings.
-
-    Args:
-        question: The user's question
-        history:  Conversation history as list of {role, content} dicts
-        ticker:   Optional ticker to restrict retrieval to one company
-        period:   Optional period_of_report to restrict to a specific filing
-
-    Returns:
-        (answer_text, retrieved_chunks)
-    """
     chroma = PersistentClient(path=DB_NAME)
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     history = history or []
-    chunks = fetch_context(question, collection, ticker=ticker, period=period)
+    chunks, xbrl_context = fetch_context(
+        question, collection, ticker=ticker, period=period, form_type=form_type
+    )
 
     if not chunks:
         return (
@@ -278,6 +288,6 @@ def answer_question(
             [],
         )
 
-    messages = make_rag_messages(question, history, chunks)
+    messages = make_rag_messages(question, history, chunks, xbrl_context)
     response = completion(model=MODEL, messages=messages)
     return response.choices[0].message.content, chunks
