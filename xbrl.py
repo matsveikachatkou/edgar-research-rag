@@ -380,7 +380,7 @@ def format_snapshot_for_context(snapshot: FinancialSnapshot) -> str:
             else:
                 formatted = f"${value:,.0f}"
         elif unit == "USD/shares":
-            formatted = f"${value:.2f}"
+            formatted = f"${value:.4f}"
         else:
             formatted = f"{value:,.2f} {unit}"
 
