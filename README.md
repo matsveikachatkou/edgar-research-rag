@@ -173,16 +173,24 @@ edgar-research-rag/
 
 ## Evaluation results
 
-Evaluated on Apple Inc. (AAPL) 10-Q for Q2 2026, 79 chunks ingested:
+Evaluated on Apple Inc. (AAPL), 8 default questions across 10-Q and 8-K filings:
 
-| Metric | Score |
-|---|---|
-| Context precision | 0.53 |
-| Answer faithfulness | 0.67 |
-| Answer relevance | 1.00 |
-| **Overall** | **0.73** |
+| Metric | v1 | v2 |
+|---|---|---|
+| Context precision | 0.53 | 0.75 |
+| Answer faithfulness | 0.67 | 0.91 |
+| Answer relevance | 1.00 | 1.00 |
+| **Overall** | **0.73** | **0.89** |
 
-Context precision improved from 0.10 (11 chunks, 15k chars) to 0.53 (79 chunks, full filing) after switching to async batched ingestion without a character cap. Answer relevance is consistently 1.00 across all question types.
+**v1 baseline:** 79 chunks, 10-Q only, eval judge truncated at 400 chars.
+
+**v2 improvements:**
+- Truncation removed from eval judge, reranker, and recommendation agent
+- 8-K earnings press release chunks added (CEO/CFO commentary, non-GAAP context)
+- XBRL structured data block injected for quantitative questions
+- Adaptive retrieval (k=8 ticker-filtered, k=15 cross-company)
+
+Notable gaps: context precision is low for forward guidance questions (Apple does not provide formal guidance in filings) and faithfulness is reduced where XBRL cash figures differ from the broader cash + investments figure in filing text.
 
 ---
 
