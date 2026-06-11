@@ -117,40 +117,48 @@ def fetch_chunks(
     collection,
     ticker: str | None = None,
     period: str | None = None,
+    filing_date_lte: str | None = None,
+    filing_date_gte: str | None = None,  # added
     k: int = RETRIEVAL_K,
 ) -> list[Result]:
-    """
-    Retrieve top-k chunks from ChromaDB.
-    Optionally filter by ticker and/or period_of_report.
-    """
     query_vec = embed_query(query)
 
-    # Build where filter
-    if ticker and period:
-        where = {"$and": [
-            {"ticker": {"$eq": ticker.upper()}},
-            {"period_of_report": {"$eq": period}},
-        ]}
-    elif ticker:
-        where = {"ticker": {"$eq": ticker.upper()}}
-    else:
+    conditions = []
+    if ticker:
+        conditions.append({"ticker": {"$eq": ticker.upper()}})
+    if period and not filing_date_lte:
+        conditions.append({"period_of_report": {"$eq": period}})
+
+    if len(conditions) == 0:
         where = None
+    elif len(conditions) == 1:
+        where = conditions[0]
+    else:
+        where = {"$and": conditions}
 
     try:
         results = collection.query(
             query_embeddings=[query_vec],
-            n_results=min(k, collection.count() or 1),
+            n_results=min(k * 2 if filing_date_lte else k, collection.count() or 1),
             where=where,
         )
     except Exception as e:
-        log.error(f"Chroma filtering query failed for ticker {ticker}: {e}")
+        log.error(f"Chroma filtering query failed for ticker={ticker} "
+                  f"filing_date_lte={filing_date_lte} period={period}: {e}")
         return []
 
     chunks = []
-    for doc, meta in zip(
-        results["documents"][0], results["metadatas"][0]
-    ):
+    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        if filing_date_lte or filing_date_gte:
+            chunk_date = meta.get("filing_date", "")
+            if filing_date_lte and chunk_date > filing_date_lte:
+                continue
+            if filing_date_gte and chunk_date < filing_date_gte:
+                continue
         chunks.append(Result(page_content=doc, metadata=meta))
+        if len(chunks) >= k:
+            break
+
     return chunks
 
 
@@ -223,30 +231,36 @@ def fetch_chunks_parallel(
     collection,
     tickers: list[str],
     k_per_ticker: int = 8,
+    filing_date_lte: str | None = None,
+    filing_date_gte: str | None = None,  # added
 ) -> list[Result]:
-    """
-    Isolated per-ticker retrieval for cross-company queries.
-    Fetches exactly k chunks per ticker using metadata filtering,
-    guaranteeing balanced representation regardless of corpus size.
-    """
     query_vec = embed_query(question)
     all_chunks: list[Result] = []
     seen = set()
 
     for ticker in tickers:
+        where = {"ticker": {"$eq": ticker}}
         try:
             results = collection.query(
                 query_embeddings=[query_vec],
-                n_results=min(k_per_ticker, collection.count() or 1),
-                where={"ticker": {"$eq": ticker}},
+                n_results=min(k_per_ticker * 2 if filing_date_lte else k_per_ticker, collection.count() or 1),
+                where=where,
             )
-            for doc, meta in zip(
-                results["documents"][0], results["metadatas"][0]
-            ):
+            ticker_count = 0
+            for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+                if filing_date_lte or filing_date_gte:
+                    chunk_date = meta.get("filing_date", "")
+                    if filing_date_lte and chunk_date > filing_date_lte:
+                        continue
+                    if filing_date_gte and chunk_date < filing_date_gte:
+                        continue
                 if doc not in seen:
                     all_chunks.append(Result(page_content=doc, metadata=meta))
                     seen.add(doc)
-            log.info(f"Parallel fetch: {ticker} → {len(results['documents'][0])} chunks")
+                    ticker_count += 1
+                    if ticker_count >= k_per_ticker:
+                        break
+            log.info(f"Parallel fetch: {ticker} → {ticker_count} chunks")
         except Exception as e:
             log.error(f"Parallel fetch failed for {ticker}: {e}")
 
@@ -393,8 +407,16 @@ def fetch_context(
     ticker: str | None = None,
     period: str | None = None,
     form_type: str | None = None,
+    filing_date_lte: str | None = None,
     final_k: int = FINAL_K,
 ) -> tuple[list[Result], str | None, str | None]:
+
+    # Compute 90-day PIT window when cutoff is set
+    filing_date_gte = None
+    if filing_date_lte:
+        from datetime import datetime, timedelta
+        cutoff = datetime.strptime(filing_date_lte, "%Y-%m-%d")
+        filing_date_gte = (cutoff - timedelta(days=90)).strftime("%Y-%m-%d")
 
     # Detect cross-company query
     if not ticker:
@@ -405,29 +427,58 @@ def fetch_context(
     if len(detected) >= 2:
         log.info(f"Cross-company query detected: {detected} — using parallel retrieval")
         rewritten = rewrite_query(question)
-        chunks_original = fetch_chunks_parallel(question, collection, detected)
-        chunks_rewritten = fetch_chunks_parallel(rewritten, collection, detected)
-        merged = merge_chunks_balanced(chunks_original, chunks_rewritten, detected, k_per_ticker=8)
+        chunks_original = fetch_chunks_parallel(
+            question, collection, detected,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+        )
+        chunks_rewritten = fetch_chunks_parallel(
+            rewritten, collection, detected,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+        )
+        merged = merge_chunks_balanced(chunks_original, chunks_rewritten, detected)
         effective_final_k = FINAL_K_BROAD
+
     elif ticker:
-        # Single ticker — tight retrieval
         rewritten = rewrite_query(question)
-        chunks_original = fetch_chunks(question, collection, ticker=ticker, period=period, k=RETRIEVAL_K)
-        chunks_rewritten = fetch_chunks(rewritten, collection, ticker=ticker, period=period, k=RETRIEVAL_K)
+        chunks_original = fetch_chunks(
+            question, collection,
+            ticker=ticker, period=period,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+            k=RETRIEVAL_K,
+        )
+        chunks_rewritten = fetch_chunks(
+            rewritten, collection,
+            ticker=ticker, period=period,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+            k=RETRIEVAL_K,
+        )
         merged = merge_chunks(chunks_original, chunks_rewritten)
         effective_final_k = final_k
+
     else:
-        # No ticker detected — broad retrieval
         rewritten = rewrite_query(question)
-        chunks_original = fetch_chunks(question, collection, k=RETRIEVAL_K_BROAD)
-        chunks_rewritten = fetch_chunks(rewritten, collection, k=RETRIEVAL_K_BROAD)
+        chunks_original = fetch_chunks(
+            question, collection,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+            k=RETRIEVAL_K_BROAD,
+        )
+        chunks_rewritten = fetch_chunks(
+            rewritten, collection,
+            filing_date_lte=filing_date_lte,
+            filing_date_gte=filing_date_gte,
+            k=RETRIEVAL_K_BROAD,
+        )
         merged = merge_chunks(chunks_original, chunks_rewritten)
         effective_final_k = FINAL_K_BROAD
 
     reranked = rerank(question, merged)
     final_chunks = reranked[:effective_final_k]
 
-    # XBRL only for single-ticker queries
     xbrl_context = None
     temporal_warning = None
     if ticker:
@@ -435,6 +486,7 @@ def fetch_context(
             ticker=ticker,
             form_type=form_type,
             period_end=period,
+            pit_cutoff=filing_date_lte,
         )
         if snapshot:
             xbrl_context = format_snapshot_for_context(snapshot)
@@ -450,13 +502,18 @@ def answer_question(
     ticker: str | None = None,
     period: str | None = None,
     form_type: str | None = None,
+    filing_date_lte: str | None = None,  
 ) -> tuple[str, list[Result]]:
     chroma = PersistentClient(path=DB_NAME)
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     history = history or []
     chunks, xbrl_context, temporal_warning = fetch_context(
-        question, collection, ticker=ticker, period=period, form_type=form_type
+        question, collection,
+        ticker=ticker,
+        period=period,
+        form_type=form_type,
+        filing_date_lte=filing_date_lte,
     )
 
     if not chunks:
@@ -467,8 +524,6 @@ def answer_question(
             [],
         )
 
-    messages = make_rag_messages(
-        question, history, chunks, xbrl_context, temporal_warning
-    )
-    response = completion(model=MODEL, messages=messages)
+    messages = make_rag_messages(question, history, chunks, xbrl_context, temporal_warning)
+    response = completion(model=MODEL, messages=messages, timeout=60)
     return response.choices[0].message.content, chunks

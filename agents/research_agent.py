@@ -38,22 +38,33 @@ class ResearchAgent(Agent):
         history: list[dict] | None = None,
         period: str | None = None,
         form_type: str | None = None,
+        filing_date_lte: str | None = None, 
     ) -> tuple[str, list[Result]]:
         """
         Produce a research summary for a ticker using RAG.
 
         Args:
-            ticker:  Company ticker symbol e.g. "AAPL"
-            focus:   Research focus area
-            history: Optional conversation history for follow-ups
-            period:  Optional period_of_report to restrict to specific filing
+            ticker:          Company ticker symbol e.g. "AAPL"
+            focus:           Research focus area
+            history:         Optional conversation history for follow-ups
+            period:          Optional period_of_report to restrict to specific filing
+            form_type:       Optional form type for XBRL routing
+            filing_date_lte: Optional PIT cutoff — only use data filed on or before
+                            this date. When set, supersedes period filter.
 
         Returns:
             (summary_text, retrieved_chunks)
         """
-        self.log(f"Researching {ticker} — focus: {focus}{' | period: ' + period if period else ''}")
+        pit_note = f" | PIT cutoff: {filing_date_lte}" if filing_date_lte else ""
+        self.log(f"Researching {ticker} — focus: {focus}{' | period: ' + period if period else ''}{pit_note}")
 
-        period_clause = f"for the period ending {period}" if period else "from the most recent SEC filing"
+        if filing_date_lte:
+            period_clause = f"using all filings available as of {filing_date_lte}"
+        elif period:
+            period_clause = f"for the period ending {period}"
+        else:
+            period_clause = "from the most recent SEC filing"
+
         question = (
             f"Based on the SEC filing for {ticker} {period_clause}, "
             f"provide a detailed analysis covering: {focus}. "
@@ -67,6 +78,7 @@ class ResearchAgent(Agent):
             ticker=ticker,
             period=period,
             form_type=form_type,
+            filing_date_lte=filing_date_lte,  # added
         )
 
         if not chunks:

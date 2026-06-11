@@ -290,8 +290,8 @@ def generate_signal(
         summary, chunks = researcher.research(
             ticker=event.ticker,
             focus=focus,
-            period=event.period_of_report,
-            form_type=event.form_type,
+            filing_date_lte=event.filing_date,
+            form_type=None,
         )
 
         if not chunks:

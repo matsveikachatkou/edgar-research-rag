@@ -287,6 +287,7 @@ def get_financial_snapshot(
     ticker: str,
     form_type: str | None = None,
     period_end: str | None = None,
+    pit_cutoff: str | None = None,
 ) -> FinancialSnapshot | None:
     ticker = ticker.upper()
     cik = resolve_cik(ticker)
@@ -306,15 +307,16 @@ def get_financial_snapshot(
 
     for ft in form_types_to_try:
         periods = _get_available_periods(facts, ft)
+        if pit_cutoff:
+            periods = [p for p in periods if p <= pit_cutoff]
         if periods:
             resolved_form_type = ft
             if not period_end:
                 period_end = periods[0]
                 log.info(f"Using most recent period for {ticker}: {period_end}")
             break
-
-    if not resolved_form_type:
-        log.warning(f"No periods found for {ticker} in {form_types_to_try}")
+    else:
+        log.warning(f"No periods found for {ticker} in {form_types_to_try} before {pit_cutoff or 'any date'}")
         return None
 
     # Check cache after period resolved
@@ -334,21 +336,23 @@ def get_financial_snapshot(
         else:
             log.warning(f"  {label}: not found for {ticker} {period_end}")
 
+    # Fallback — if no metrics found, try most recent available period
     if not metrics:
         log.warning(f"No metrics for {ticker} {period_end} — trying most recent available period")
-        
-        # Try 10-Q first, then 10-K — always PIT filtered
+
+        cutoff = pit_cutoff or period_end
+
         fallback_period = None
         fallback_form = None
-        
+
         for ft in ["10-Q", "10-K"]:
             periods = _get_available_periods(facts, ft)
-            pit_periods = [p for p in periods if p <= period_end]
+            pit_periods = [p for p in periods if not cutoff or p <= cutoff]
             if pit_periods:
-                fallback_period = pit_periods[0]  # most recent before event
+                fallback_period = pit_periods[0]
                 fallback_form = ft
                 break
-        
+
         if fallback_period:
             log.info(f"Falling back to {fallback_form} {fallback_period} for {ticker}")
             for label in METRIC_TAGS:
