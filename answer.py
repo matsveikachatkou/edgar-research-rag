@@ -12,6 +12,7 @@ Retrieval pipeline:
 import os
 from pathlib import Path
 import logging
+from datetime import datetime
 
 from chromadb import PersistentClient
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from openai import OpenAI
 from tenacity import retry, wait_exponential
 
 from models.research import RankOrder, Result
-from xbrl import get_financial_snapshot, format_snapshot_for_context
+from xbrl import get_financial_snapshot, format_snapshot_for_context, FinancialSnapshot
 
 load_dotenv(override=True)
 
@@ -53,10 +54,10 @@ Your answers must be:
 
 Important: When both GAAP and non-GAAP figures are present in the context:
 - XBRL structured data contains audited GAAP figures
-- 8-K press release excerpts may contain non-GAAP figures (adjusted EPS, free cash flow, etc.)
-- Always label which standard you are citing — never mix GAAP and non-GAAP in the same claim
+- 8-K press release excerpts may contain non-GAAP figures
+- Always label which standard you are citing
 
-{xbrl_block}Here are relevant excerpts from SEC filings and press releases:
+{warning_block}{xbrl_block}Here are relevant excerpts from SEC filings and press releases:
 
 {context}
 
@@ -220,15 +221,73 @@ def build_context(chunks: list[Result]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+from datetime import datetime
+
+def detect_temporal_mismatch(
+    chunks: list[Result],
+    snapshot: FinancialSnapshot | None,
+) -> str | None:
+    """
+    Detect if retrieved chunks contain more recent data than the XBRL snapshot.
+    Returns a warning string if mismatch detected, None otherwise.
+    """
+    if not snapshot or not snapshot.period_end:
+        return None
+
+    # Find the latest period across all retrieved chunks
+    chunk_periods = []
+    for chunk in chunks:
+        period = chunk.metadata.get("period_of_report", "")
+        if period:
+            chunk_periods.append(period)
+
+    if not chunk_periods:
+        return None
+
+    # Sort chronologically, not lexicographically
+    try:
+        latest_chunk_period = max(
+            chunk_periods, 
+            key=lambda d: datetime.strptime(d, "%Y-%m-%d")
+        )
+        
+        chunk_date = datetime.strptime(latest_chunk_period, "%Y-%m-%d")
+        snapshot_date = datetime.strptime(snapshot.period_end, "%Y-%m-%d")
+        
+        if chunk_date > snapshot_date:
+            return (
+                f"SYSTEM WARNING: The structured financial data (XBRL) is dated "
+                f"{snapshot.period_end} ({snapshot.form_type}). "
+                f"The retrieved narrative context contains more recent material "
+                f"events up to {latest_chunk_period}. "
+                f"Do NOT apply the quantitative figures to the more recent narrative "
+                f"events. Clearly distinguish between historical GAAP data and "
+                f"the more recent narrative disclosures when formulating your answer."
+            )
+    except ValueError as e:
+        # Failsafe: If date parsing fails due to unexpected format, skip the warning 
+        # rather than crashing the entire RAG pipeline.
+        log.warning(f"Date parsing error in temporal mismatch check: {e}")
+        return None
+
+    return None
+
+
 def make_rag_messages(
     question: str,
     history: list[dict],
     chunks: list[Result],
     xbrl_context: str | None = None,
+    temporal_warning: str | None = None,
 ) -> list[dict]:
     context = build_context(chunks)
     xbrl_block = f"{xbrl_context}\n\n---\n\n" if xbrl_context else ""
-    system = SYSTEM_PROMPT.format(context=context, xbrl_block=xbrl_block)
+    warning_block = f"{temporal_warning}\n\n---\n\n" if temporal_warning else ""
+    system = SYSTEM_PROMPT.format(
+        context=context,
+        xbrl_block=xbrl_block,
+        warning_block=warning_block,
+    )
     return (
         [{"role": "system", "content": system}]
         + history[-4:]
@@ -246,7 +305,7 @@ def fetch_context(
     period: str | None = None,
     form_type: str | None = None,
     final_k: int = FINAL_K,
-) -> tuple[list[Result], str | None]:
+) -> tuple[list[Result], str | None, str | None]:
     k = RETRIEVAL_K if ticker else RETRIEVAL_K_BROAD
     effective_final_k = final_k if ticker else FINAL_K_BROAD
 
@@ -255,8 +314,10 @@ def fetch_context(
     chunks_rewritten = fetch_chunks(rewritten, collection, ticker=ticker, period=period, k=k)
     merged = merge_chunks(chunks_original, chunks_rewritten)
     reranked = rerank(question, merged)
+    final_chunks = reranked[:effective_final_k]
 
     xbrl_context = None
+    temporal_warning = None
     if ticker:
         snapshot = get_financial_snapshot(
             ticker=ticker,
@@ -265,8 +326,9 @@ def fetch_context(
         )
         if snapshot:
             xbrl_context = format_snapshot_for_context(snapshot)
+            temporal_warning = detect_temporal_mismatch(final_chunks, snapshot)
 
-    return reranked[:effective_final_k], xbrl_context
+    return final_chunks, xbrl_context, temporal_warning
 
 
 @retry(wait=WAIT)
@@ -281,7 +343,7 @@ def answer_question(
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     history = history or []
-    chunks, xbrl_context = fetch_context(
+    chunks, xbrl_context, temporal_warning = fetch_context(
         question, collection, ticker=ticker, period=period, form_type=form_type
     )
 
@@ -293,6 +355,8 @@ def answer_question(
             [],
         )
 
-    messages = make_rag_messages(question, history, chunks, xbrl_context)
+    messages = make_rag_messages(
+        question, history, chunks, xbrl_context, temporal_warning
+    )
     response = completion(model=MODEL, messages=messages)
     return response.choices[0].message.content, chunks
