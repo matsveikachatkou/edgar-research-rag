@@ -37,6 +37,7 @@ class Chunk(BaseModel):
             "company_name": filing.company_name,
             "form_type": filing.form_type,
             "filed_at": filing.filed_at.isoformat(),
+            "filing_date": filing.filed_at.strftime("%Y-%m-%d"),  
             "period_of_report": filing.period_of_report or "",
             "filing_url": filing.filing_url,
         }
