@@ -335,7 +335,33 @@ def get_financial_snapshot(
             log.warning(f"  {label}: not found for {ticker} {period_end}")
 
     if not metrics:
-        log.warning(f"No metrics extracted for {ticker} {period_end}")
+        log.warning(f"No metrics for {ticker} {period_end} — trying most recent available period")
+        
+        # Try 10-Q first, then 10-K — always PIT filtered
+        fallback_period = None
+        fallback_form = None
+        
+        for ft in ["10-Q", "10-K"]:
+            periods = _get_available_periods(facts, ft)
+            pit_periods = [p for p in periods if p <= period_end]
+            if pit_periods:
+                fallback_period = pit_periods[0]  # most recent before event
+                fallback_form = ft
+                break
+        
+        if fallback_period:
+            log.info(f"Falling back to {fallback_form} {fallback_period} for {ticker}")
+            for label in METRIC_TAGS:
+                metric = _find_metric_value(facts, label, fallback_period, fallback_form)
+                if metric:
+                    metrics.append(metric)
+            if metrics:
+                period_end = fallback_period
+                resolved_form_type = fallback_form
+                log.info(f"Fallback successful: {len(metrics)} metrics for {period_end}")
+
+    if not metrics:
+        log.warning(f"No metrics extracted for {ticker} — giving up")
         return None
 
     snapshot = FinancialSnapshot(
