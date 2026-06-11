@@ -18,6 +18,8 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 
 **Structured + unstructured fusion** — Quantitative questions (revenue, margins, EPS, cash) are answered using exact XBRL figures pulled directly from the SEC EDGAR Frames API, eliminating hallucination risk on financial metrics. Narrative context (management commentary, risk factors, segment performance) comes from the RAG pipeline. Both sources are fused in a single answer with full citations.
 
+**Earnings press release ingestion** — Ingests 8-K earnings press releases  (Exhibit 99.1) alongside 10-Q/10-K filings. Press releases are available ~1 week before the full 10-Q filing, providing earlier access to results. CEO/CFO commentary, non-GAAP metrics, and forward guidance are retrieved alongside audited GAAP figures from the structured XBRL layer.
+
 ---
 
 ## Architecture
@@ -26,6 +28,9 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 ┌─────────────────────────────────────────────────────┐
 │  Ingestion layer                                     │
 │  EDGAR submissions API → BeautifulSoup → LLM chunker │
+│  10-Q/10-K: full filings                             │
+│  8-K: Exhibit 99.1 earnings press releases only      │
+│       (item 2.02 filter + exhibit directory scan)    │
 │  → ChromaDB (incremental, ticker+period metadata)    │
 └────────────────────┬────────────────────────────────┘
                      │
@@ -65,6 +70,8 @@ Built as a portfolio project demonstrating production-grade LLM application deve
 - **Dynamic CIK resolution** — Any US-listed ticker resolves to a CIK via SEC's public mapping file. No hardcoded lookup tables.
 - **XBRL structured data fusion** — The SEC EDGAR Frames API exposes every reported financial fact as structured XBRL data. Rather than relying on RAG to extract figures from flattened HTML tables (which loses row/column relationships), key metrics (revenue, operating income, net income, EPS, cash, total assets, operating cash flow, gross profit) are fetched directly via a taxonomy fallback resolver that handles tag variations across filers. Snapshots are cached to disk to avoid redundant API calls. Results are prepended to the LLM context when a ticker is identified, giving the model ground-truth numbers alongside filing narrative.
 - **Adaptive retrieval** — Retrieval pool size scales with query scope: ticker-filtered queries use k=8 for cost efficiency; unfiltered cross-company queries use k=15 to ensure balanced company representation in results.
+- **8-K earnings release extraction** — The scanner filters 8-K filings by SEC item code 2.02 (Results of Operations) to ingest only earnings releases, not unrelated corporate events. Exhibit 99.1 (the press release) is discovered by scanning the filing index directory for `ex99` filename patterns, since the primary document is always just the cover page.
+- **GAAP vs non-GAAP source labeling** — The system prompt explicitly instructs the LLM to distinguish between XBRL-sourced GAAP figures and 8-K press release non-GAAP figures. Sources are always cited by form type so the reader knows which standard applies.
 
 ---
 
@@ -187,6 +194,7 @@ Context precision improved from 0.10 (11 chunks, 15k chars) to 0.53 (79 chunks, 
 - Aggregation questions — RAG retrieves by semantic similarity, not by structured data. Questions like "which company has the highest margin?" work by chance, not by design. A structured extraction layer on top would handle this reliably.
 - XBRL coverage — the structured data layer covers 8 core metrics via US-GAAP taxonomy. Companies using non-standard tags beyond the fallback list will return partial snapshots; the RAG layer still functions normally as fallback. European filers (IFRS taxonomy) are not covered.
 - Cross-company retrieval — unfiltered queries rank by embedding similarity, which can favour one company over another. Per-ticker retrieval with guaranteed minimum chunks per mentioned company is a natural next step.
+- 8-K coverage — only earnings press releases (item 2.02) are ingested. Other 8-K events (acquisitions, leadership changes, guidance updates) are filtered out. Non-GAAP figures in press releases are not standardized across companies — the LLM extracts them from text rather than structured data.
 
 **Natural next steps:**
 - Scheduled ingestion — GitHub Actions or cron running `ingest.py` weekly to keep the corpus current
