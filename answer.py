@@ -24,6 +24,8 @@ from tenacity import retry, wait_exponential
 from models.research import RankOrder, Result
 from xbrl import get_financial_snapshot, format_snapshot_for_context, FinancialSnapshot
 
+_rewrite_cache: dict[str, str] = {}
+
 load_dotenv(override=True)
 
 # Config
@@ -35,7 +37,7 @@ MODEL = "openai/gpt-4.1-mini"
 DB_NAME = str(Path(__file__).parent / "edgar_db")
 COLLECTION_NAME = "edgar_filings"
 EMBEDDING_MODEL = "text-embedding-3-large"
-WAIT = wait_exponential(multiplier=1, min=2, max=240)
+WAIT = wait_exponential(multiplier=1, min=2, max=30)
 
 RETRIEVAL_K = 8        # single-ticker queries
 RETRIEVAL_K_BROAD = 15 # unfiltered cross-company queries
@@ -74,8 +76,13 @@ def rewrite_query(question: str, history: list[dict] | None = None) -> str:
     """
     Rewrite the user's question into a concise retrieval query.
     Takes conversation history into account for follow-up questions.
+    Results are cached in-memory to avoid redundant LLM calls.
     """
     history = history or []
+    cache_key = question[:100] + str(history[-1:])
+    if cache_key in _rewrite_cache:
+        return _rewrite_cache[cache_key]
+
     history_text = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in history[-4:]
     )
@@ -97,7 +104,9 @@ Respond ONLY with the search query — no explanation."""
         model=MODEL,
         messages=[{"role": "system", "content": message}],
     )
-    return response.choices[0].message.content.strip()
+    result = response.choices[0].message.content.strip()
+    _rewrite_cache[cache_key] = result
+    return result
 
 
 # Retrieval
