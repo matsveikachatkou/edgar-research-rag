@@ -7,3 +7,6 @@ arxiv_db/
 research_vectorstore/
 research_memory.json
 .DS_Store
+edgar_db/
+financial_memory.json
+research_memory.json
