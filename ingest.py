@@ -98,28 +98,53 @@ def resolve_cik(ticker: str) -> str | None:
 
 def _find_exhibit_99(cik_short: str, acc_clean: str, accession: str) -> str | None:
     """
-    Scan the 8-K filing index for Exhibit 99.1 (earnings press release).
-    Returns the full URL of the exhibit or None if not found.
+    Find Exhibit 99.1 (earnings press release) by parsing the SEC EDGAR
+    filing index table. Extracts by exact Type column match ('EX-99.1'),
+    not by filename pattern — robust to non-standard naming conventions.
     """
     index_url = (
         f"https://www.sec.gov/Archives/edgar/data/"
-        f"{cik_short}/{acc_clean}/"
+        f"{cik_short}/{acc_clean}/{accession}-index.htm"
     )
     try:
         resp = requests.get(index_url, headers=SEC_HEADERS, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "lxml")
-        for a in soup.find_all("a"):
-            href = a.get("href", "").lower()
-            filename = href.split("/")[-1]
-            if ("ex99" in filename or "ex-99" in filename) and filename.endswith(".htm"):
-                full_url = f"https://www.sec.gov{a.get('href')}"
-                log.info(f"Found Exhibit 99.1: {full_url}")
-                return full_url
-        log.warning(f"No Exhibit 99.1 found in {index_url}")
+
+        # SEC EDGAR standard index table
+        table = soup.find("table", {"summary": "Document Format Files"})
+        if not table:
+            log.warning(f"No document table found in index: {index_url}")
+            return None
+
+        for row in table.find_all("tr"):
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            
+            # Type column is the 4th <td> (index 3)
+            doc_type = cols[3].get_text(strip=True)
+            if doc_type != "EX-99.1":
+                continue
+
+            # Document column is the 3rd <td> (index 2)
+            link = cols[2].find("a")
+            if not link:
+                continue
+
+            href = link.get("href", "")
+            if not href:
+                continue
+
+            full_url = f"https://www.sec.gov{href}"
+            log.info(f"Found EX-99.1 via index table: {full_url}")
+            return full_url
+
+        log.warning(f"EX-99.1 not found in index table: {index_url}")
         return None
+
     except Exception as e:
-        log.error(f"Exhibit discovery failed for {accession}: {e}")
+        log.error(f"Exhibit index parsing failed for {accession}: {e}")
         return None
 
 
