@@ -153,23 +153,6 @@ def get_available_tickers() -> list[str]:
         return []
 
 
-def get_form_type_for_period(ticker: str, period: str) -> str:
-    """Infer form_type from vector store metadata for a given ticker/period."""
-    try:
-        from chromadb import PersistentClient
-        db = PersistentClient(path=str(Path("edgar_db")))
-        col = db.get_or_create_collection("edgar_filings")
-        results = col.get(where={"$and": [
-            {"ticker": {"$eq": ticker.upper()}},
-            {"period_of_report": {"$eq": period}},
-        ]}, limit=1)
-        if results["metadatas"]:
-            return results["metadatas"][0].get("form_type", "10-Q")
-    except Exception:
-        pass
-    return "10-Q"
-
-
 def generate_recommendation(ticker: str, period: str) -> str:
     """Generate a recommendation for a specific ticker and filing period."""
     if not ticker or not period:
@@ -179,14 +162,12 @@ def generate_recommendation(ticker: str, period: str) -> str:
         from agents.recommend_agent import RecommendAgent
         researcher = ResearchAgent()
         recommender = RecommendAgent()
-
-        form_type = get_form_type_for_period(ticker, period)
+        
 
         summary, chunks = researcher.research(
             ticker=ticker,
             focus="investment outlook, revenue trends, key risks",
             period=period,
-            form_type=form_type,
         )
         if not chunks:
             return f"No data found for {ticker} {period}. Please ingest this filing first."
@@ -371,7 +352,7 @@ with gr.Blocks(title="EDGAR Research RAG") as app:
                         ticker_filter = gr.Textbox(
                             placeholder="Ticker (clear for cross-company search)",
                             show_label=False,
-                            scale=4,
+                            scale=5,
                             min_width=150,
                         )
                     clear = gr.ClearButton([msg, chatbot])
