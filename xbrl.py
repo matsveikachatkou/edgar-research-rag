@@ -393,7 +393,8 @@ def format_snapshot_for_context(snapshot: FinancialSnapshot) -> str:
     """
     lines = [
         f"[STRUCTURED FINANCIALS — {snapshot.company_name} ({snapshot.ticker})]",
-        f"Source: SEC EDGAR XBRL | Period: {snapshot.period_end} | Form: {snapshot.form_type}",
+        f"Source: SEC EDGAR XBRL | Audited {snapshot.form_type} | Period: {snapshot.period_end}",
+        f"Note: These are the official GAAP figures from the {snapshot.form_type} filing.",
         "",
     ]
 

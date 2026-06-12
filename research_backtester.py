@@ -389,6 +389,7 @@ class BacktestEngine:
             )
 
             self.results.append(result)
+            self.save()
             log.info(
                 f"Result: {rec.recommendation.upper()} | "
                 f"30d: {returns.get(30)} | "

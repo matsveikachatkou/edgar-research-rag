@@ -118,6 +118,14 @@ def get_coverage_table():
     except Exception:
         return pd.DataFrame(columns=["Ticker", "Company", "Form", "Period", "Chunks"])
 
+
+def get_coverage_table_filtered(ticker: str = "All"):
+    df = get_coverage_table()
+    if ticker and ticker != "All" and not df.empty:
+        return df[df["Ticker"] == ticker]
+    return df
+    
+
 def get_periods_for_ticker(ticker: str) -> list[str]:
     """Get available filing periods for a ticker from the vector store."""
     try:
@@ -329,16 +337,31 @@ with gr.Blocks(title="EDGAR Research RAG") as app:
         # Tab 1: Research Chat
         with gr.Tab("Research Chat"):
             with gr.Row():
-                coverage_table = gr.Dataframe(
-                    value=get_coverage_table(),
-                    label="Coverage universe — filings available in the vector store",
-                    interactive=False,
-                    wrap=True,
+                coverage_ticker = gr.Dropdown(
+                    choices=["All"] + get_available_tickers(),
+                    value="All",
+                    label="Filter by ticker",
+                    scale=1,
                 )
                 refresh_btn = gr.Button("Refresh", scale=0, min_width=100)
+            coverage_table = gr.Dataframe(
+                value=get_coverage_table(),
+                label="Coverage universe — filings available in the vector store",
+                interactive=False,
+                wrap=True,
+                elem_classes=["scrollable-table"],
+            )
+            coverage_ticker.change(
+                fn=get_coverage_table_filtered,
+                inputs=[coverage_ticker],
+                outputs=[coverage_table],
+            )
             refresh_btn.click(
                 fn=get_coverage_table,
                 outputs=[coverage_table],
+            ).then(
+                fn=lambda: gr.Dropdown(choices=["All"] + get_available_tickers()),
+                outputs=[coverage_ticker],
             )
             with gr.Row():
                 with gr.Column(scale=3):
@@ -516,5 +539,12 @@ if __name__ == "__main__":
     css="""
         * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important; }
         .gradio-container { max-width: 1400px !important; }
+        .scrollable-table {
+            max-height: 210px !important;
+            overflow-y: auto !important;
+        }
+        .scrollable-table table {
+            position: relative;
+        }
     """
 )
