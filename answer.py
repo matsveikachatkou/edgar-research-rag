@@ -55,6 +55,13 @@ Your answers must be:
 - Cited by company name and filing type when referencing specific data
 - Honest about uncertainty — if the context doesn't contain enough information, say so
 
+CITATION RULE: For revenue, gross profit, operating income, net income, EPS, \
+cash, total assets, and operating cash flow — these figures come from the \
+STRUCTURED FINANCIALS block below and must be cited as the audited {form_type} \
+filing (e.g. "10-Q {period_end}"), NOT the 8-K, even if the 8-K mentions the \
+same number. The 8-K press release is for management commentary, non-GAAP \
+metrics, and forward guidance only.
+
 Important: When both GAAP and non-GAAP figures are present in the context:
 - XBRL structured data contains audited GAAP figures
 - 8-K press release excerpts may contain non-GAAP figures
@@ -391,7 +398,10 @@ def make_rag_messages(
     chunks: list[Result],
     xbrl_context: str | None = None,
     temporal_warning: str | None = None,
+    xbrl_form_type: str | None = None,
+    xbrl_period_end: str | None = None,
 ) -> list[dict]:
+    """Build the full message list for the final answer LLM call."""
     context = build_context(chunks)
     xbrl_block = f"{xbrl_context}\n\n---\n\n" if xbrl_context else ""
     warning_block = f"{temporal_warning}\n\n---\n\n" if temporal_warning else ""
@@ -399,6 +409,8 @@ def make_rag_messages(
         context=context,
         xbrl_block=xbrl_block,
         warning_block=warning_block,
+        form_type=xbrl_form_type or "10-Q",
+        period_end=xbrl_period_end or "",
     )
     return (
         [{"role": "system", "content": system}]
@@ -418,7 +430,7 @@ def fetch_context(
     form_type: str | None = None,
     filing_date_lte: str | None = None,
     final_k: int = FINAL_K,
-) -> tuple[list[Result], str | None, str | None]:
+) -> tuple[list[Result], str | None, str | None, str | None, str | None]:
 
     # Compute 90-day PIT window when cutoff is set
     filing_date_gte = None
@@ -490,6 +502,8 @@ def fetch_context(
 
     xbrl_context = None
     temporal_warning = None
+    xbrl_form_type = None
+    xbrl_period_end = None
     if ticker:
         snapshot = get_financial_snapshot(
             ticker=ticker,
@@ -500,8 +514,10 @@ def fetch_context(
         if snapshot:
             xbrl_context = format_snapshot_for_context(snapshot)
             temporal_warning = detect_temporal_mismatch(final_chunks, snapshot)
+            xbrl_form_type = snapshot.form_type
+            xbrl_period_end = snapshot.period_end
 
-    return final_chunks, xbrl_context, temporal_warning
+    return final_chunks, xbrl_context, temporal_warning, xbrl_form_type, xbrl_period_end
 
 
 @retry(wait=WAIT)
@@ -511,13 +527,13 @@ def answer_question(
     ticker: str | None = None,
     period: str | None = None,
     form_type: str | None = None,
-    filing_date_lte: str | None = None,  
+    filing_date_lte: str | None = None,
 ) -> tuple[str, list[Result]]:
     chroma = PersistentClient(path=DB_NAME)
     collection = chroma.get_or_create_collection(COLLECTION_NAME)
 
     history = history or []
-    chunks, xbrl_context, temporal_warning = fetch_context(
+    chunks, xbrl_context, temporal_warning, xbrl_form_type, xbrl_period_end = fetch_context(
         question, collection,
         ticker=ticker,
         period=period,
@@ -533,6 +549,9 @@ def answer_question(
             [],
         )
 
-    messages = make_rag_messages(question, history, chunks, xbrl_context, temporal_warning)
+    messages = make_rag_messages(
+        question, history, chunks, xbrl_context, temporal_warning,
+        xbrl_form_type=xbrl_form_type, xbrl_period_end=xbrl_period_end,
+    )
     response = completion(model=MODEL, messages=messages, timeout=60)
     return response.choices[0].message.content, chunks
